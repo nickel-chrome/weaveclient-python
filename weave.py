@@ -270,7 +270,7 @@ class WeaveStorageContext(object):
 
 		# Get storage version
 		meta = self.get_meta()
-		self.version = meta['storageVersion']
+		self.version = int(meta['storageVersion'])
 		if not (self.version == 3 or self.version == 5):
 			raise WeaveException("Storage version %s not supported" % self.version)
 			
