@@ -60,272 +60,14 @@ class WeaveException(Exception):
 		return repr(self.value)
 
 
-############ WEAVE USER API ###############
-
-def createUser(serverURL, userID, password, email, secret = None, captchaChallenge = None, captchaResponse = None):
-	"""Create a new user at the given server, with the given userID, password, and email.
-
-	If a secret is provided, or a captchaChallenge/captchaResponse pair, those will be provided
-	as well.  Note that the exact new-user-authorization logic is determined by the server."""
-
-	if userID.find('"') >=0:
-		raise ValueError("Weave userIDs may not contain the quote character")
-	if email.find('"') >=0:
-		raise ValueError("Weave email addresses may not contain the quote character")
-	if secret and secret.find('"') >=0:
-		raise ValueError("Weave secret may not contain the quote character")
-
-	url = serverURL + "/user/1.0/%s/" % userID
-
-	secretStr = ""
-	captchaStr = ""
-	if secret:
-		secretStr = ''', "secret":"%s"''' % secret
-
-	if captchaChallenge and captchaResponse:
-		if secret:
-			raise WeaveException("Cannot provide both a secret and a captchaResponse to createUser")
-		captchaStr = ''', "captcha-challenge":"%s", "captcha-response":"%s"''' % (captchaChallenge, captchaResponse)
-
-	payload = '''{"password":"%s", "email": "%s"%s%s}''' % (password, email, secretStr, captchaStr)
-
-	req = urllib2.Request(url, data=payload)
-	req.get_method = lambda: 'PUT'
-	try:
-		f = opener.open(req)
-		result = f.read()
-		if result != userID:
-			raise WeaveException("Unable to create new user: got return value '%s' from server" % result)
-
-	except urllib2.URLError, e:
-		msg = ""
-		try:
-			msg = e.read()
-		except:
-			pass
-		raise WeaveException("Unable to communicate with Weave server: " + str(e) + "; %s" % msg)
-
-
-def checkNameAvailable(serverURL, userID):
-	"""Returns a boolean for whether the given userID is available at the given server."""
-	if userID.find('"') >=0:
-		raise ValueError("Weave userIDs may not contain the quote character")
-
-	url = serverURL + "/user/1.0/%s/" % userID
-
-	req = urllib2.Request(url)
-	try:
-		f = urllib2.urlopen(req)
-		result = f.read()
-		if result == "1":
-			return False
-		elif result == "0":
-			return True
-		else:
-			raise WeaveException("Unexpected return value from server on name-availability request: '%s'" % result)
-	except urllib2.URLError, e:
-		raise WeaveException("Unable to communicate with Weave server: " + str(e))
-
-
-def getUserStorageNode(serverURL, userID, password):
-	"""Returns the URL representing the storage node for the given user.
-
-	Note that in the 1.0 server implementation hosted by Mozilla, the password
-	is not actually required for this call."""
-
-	if userID.find('"') >=0:
-		raise ValueError("Weave userIDs may not contain the quote character")
-
-	url = serverURL + "/user/1.0/%s/node/weave" % userID
-
-
-	req = urllib2.Request(url)
-	base64string = base64.encodestring('%s:%s' % (userID, password))[:-1]
-	req.add_header("Authorization", "Basic %s" % base64string)
-
-	try:
-		f = opener.open(req)
-		result = f.read()
-		f.close()
-		return result
-
-	except urllib2.URLError, e:
-		if str(e).find("404") >= 0:
-			return serverURL
-		else:
-			raise WeaveException("Unable to communicate with Weave server: " + str(e))
-
-
-def changeUserEmail(serverURL, userID, password, newemail):
-	"""Change the email address of the given user."""
-
-	if userID.find('"') >=0:
-		raise ValueError("Weave userIDs may not contain the quote character")
-	if newemail.find('"') >=0:
-		raise ValueError("Weave email addresses may not contain the quote character")
-
-	url = serverURL + "/user/1.0/%s/email" % userID
-
-	payload = newemail
-
-	req = urllib2.Request(url, data=payload)
-	base64string = base64.encodestring('%s:%s' % (userID, password))[:-1]
-	req.add_header("Authorization", "Basic %s" % base64string)
-	req.get_method = lambda: 'POST'
-	try:
-		f = opener.open(req)
-		result = f.read()
-		if result != newemail:
-			raise WeaveException("Unable to change user email: got return value '%s' from server" % result)
-
-	except urllib2.URLError, e:
-		raise WeaveException("Unable to communicate with Weave server: %s" % e)
-
-
-
-def changeUserPassword(serverURL, userID, password, newpassword):
-	"""Change the password of the given user."""
-
-	if userID.find('"') >=0:
-		raise ValueError("Weave userIDs may not contain the quote character")
-
-	url = serverURL + "/user/1.0/%s/password" % userID
-
-	payload = newpassword
-	req = urllib2.Request(url, data=payload)
-	base64string = base64.encodestring('%s:%s' % (userID, password))[:-1]
-	req.add_header("Authorization", "Basic %s" % base64string)
-	req.get_method = lambda: 'POST'
-	try:
-
-		f = opener.open(req)
-		result = f.read()
-		if result != "success":
-			raise WeaveException("Unable to change user password: got return value '%s' from server" % result)
-
-	except urllib2.URLError, e:
-		raise WeaveException("Unable to communicate with Weave server: %s" % e)
-
-
-
-def deleteUser(serverURL, userID, password):
-	"""Delete the given user."""
-
-	if userID.find('"') >=0:
-		raise ValueError("Weave userIDs may not contain the quote character")
-
-	url = serverURL + "/user/1.0/%s/" % userID
-
-	req = urllib2.Request(url)
-	base64string = base64.encodestring('%s:%s' % (userID, password))[:-1]
-	req.add_header("Authorization", "Basic %s" % base64string)
-	req.get_method = lambda: 'DELETE'
-	try:
-		f = opener.open(req)
-		result = f.read()
-
-	except urllib2.URLError, e:
-		msg = ""
-		try:
-			msg = e.read()
-		except:
-			pass
-		raise WeaveException("Unable to communicate with Weave server: " + str(e) + "; %s" % msg)
-
-
-
-def setUserProfile(serverURL, userID, profileField, profileValue):
-	"""Experimental: Set a user profile field.	Not part of the 1.0 API."""
-
-	if userID.find('"') >=0:
-		raise ValueError("Weave userIDs may not contain the quote character")
-
-	url = serverURL + "/user/1.0/%s/profile" % userID
-
-	payload = newpassword
-	req = urllib2.Request(url, data=payload)
-	base64string = base64.encodestring('%s:%s' % (userID, password))[:-1]
-	req.add_header("Authorization", "Basic %s" % base64string)
-	req.get_method = lambda: 'POST'
-	try:
-		f = opener.open(req)
-		result = f.read()
-		if result != "success":
-			raise WeaveException("Unable to change user password: got return value '%s' from server" % result)
-
-	except urllib2.URLError, e:
-		raise WeaveException("Unable to communicate with Weave server: %s" % e)
-
-
-
-def getOnePwAuthToken(serverURL, userID, password):
-	"""Returns the auth token for the given user."""
-
-	if userID.find('"') >=0:
-		raise ValueError("Weave userIDs may not contain the quote character")
-
-	url = serverURL + "/account/login"
-
-	wa = new WeaveAccountOnePwContext(url, userID, password)
-	
-	payload = wa.buildAuthTokenRequest()
-	req = urllib2.Request(url, data=payload)
-	req.get_method = lambda: 'POST'
-	try:
-
-		f = opener.open(req)
-		result = f.read()
-		if result != "success":
-			raise WeaveException("Unable to get auth token: got return value '%s' from server" % result)
-
-	except urllib2.URLError, e:
-		raise WeaveException("Unable to communicate with token server: %s" % e)
-
-	try:
-		f = opener.open(req)
-		result = f.read()
-		f.close()
-		return result
-
-	except urllib2.URLError, e:
-		if str(e).find("404") >= 0:
-			return serverURL
-		else:
-			raise WeaveException("Unable to communicate with token server: " + str(e))
-
-
-# OnePw implementation:
-from PBKDF2 import PBKDF2
-from M2Crypto.EVP import Cipher, RSA, load_key_string
-import M2Crypto.m2
-
-M2Crypto_Decrypt = 0
-M2Crypto_Encrypt = 1
-
-
-class WeaveAccountOnePwContext(object):
-	"""Encapsulates the cryptographic context for the OnePw account and token server."""
-
-	def __init__(self, username, passworkd):
-		self.username  = None
-		self.password  = None
-		self.authToken = None
-
-	def buildAuthTokenRequest(self):
-		"""Build the get Auth Token request body"""
-		
-		logging.debug("buildAuthTokenRequest()")
-
-		quickStretchPW = PBKDF2(self.password, self.username, iterations=1000).read(32)
-
-
+import weaveaccount
 
 class WeaveStorageContext(object):
 	"""An object that encapsulates a server, userID, and password, to simplify
 	storage calls for the client."""
 
-	def __init__(self, userID, password, rootServer):
-		self.url = getUserStorageNode(rootServer, userID, password)
+	def __init__(self, rootServer, userID, password):
+		self.url = weaveaccount.WeaveRegistrationContext.get_storage_url(rootServer, userID, password)
 		if self.url[len(self.url)-1] == '/': self.url = self.url[:len(self.url)-1]
 		self.userID = userID
 		self.password = password
@@ -341,16 +83,16 @@ class WeaveStorageContext(object):
 	def http_get(self, url):
 		return storage_http_op("GET", self.userID, self.password, url)
 
-	def add_or_modify_item(self, collection, item, urlID=None, ifUnmodifiedSince=None):
+	def put(self, collection, item, urlID=None, ifUnmodifiedSince=None):
 		return add_or_modify_item(self.url, self.userID, self.password, collection, item, urlID=urlID, ifUnmodifiedSince=ifUnmodifiedSince)
 
-	def add_or_modify_items(self, collection, itemArray, ifUnmodifiedSince=None):
+	def put_collection(self, collection, itemArray, ifUnmodifiedSince=None):
 		return add_or_modify_items(self.url, self.userID, self.password, collection, itemArray, ifUnmodifiedSince=ifUnmodifiedSince)
 
-	def delete_item(self, collection, id, ifUnmodifiedSince=None):
+	def delete(self, collection, id, ifUnmodifiedSince=None):
 		return delete_item(self.url, self.userID, self.password, collection, id, ifUnmodifiedSince=ifUnmodifiedSince)
 
-	def delete_items(self, collection, idArray=None, params=None):
+	def delete_collection(self, collection, idArray=None, params=None):
 		return delete_items(self.url, self.userID, self.password, collection, idArray=idArray, params=params)
 
 	def delete_items_older_than(self, collection, timestamp):
@@ -368,10 +110,10 @@ class WeaveStorageContext(object):
 	def get_collection_ids(self, collection, params=None, asJSON=True, outputFormat=None):
 		return get_collection_ids(self.url, self.userID, self.password, collection, params=params, asJSON=asJSON, outputFormat=outputFormat)
 
-	def get_item(self, collection, id, asJSON=True):
+	def get(self, collection, id, asJSON=True):
 		return get_item(self.url, self.userID, self.password, collection, id, asJSON=asJSON, withAuth=True)
 
-	def get_items(self, collection, asJSON=True):
+	def get_collection(self, collection, asJSON=True):
 		return get_items(self.url, self.userID, self.password, collection, asJSON=asJSON, withAuth=True)
 
 	def get_quota(self):
@@ -561,11 +303,11 @@ M2Crypto_Decrypt = 0
 M2Crypto_Encrypt = 1
 
 
-class WeaveCryptoContext(object):
+class WeaveClient(object):
 	"""Encapsulates the cryptographic context for a user and their collections."""
 
-	def __init__(self, storageContext, passphrase):
-		self.ctx = storageContext
+	def __init__(self, rootServer, userID, password, passphrase):
+		self.ctx = WeaveStorageContext(rootServer, userID, password)
 		self.passphrase = passphrase
 		self.privateKey = None
 		self.privateHmac = None
@@ -762,8 +504,18 @@ class WeaveCryptoContext(object):
 			logging.debug("Successfully decrypted bulk key from %s" % label)
 
 		return
-		
 
+	def decrypt_weave_basic_object(self, wbo, encryptionLabel=None):
+		
+		logging.debug("decrypt_weave_basic_object()")
+
+		cleartext = self.decrypt(wbo['payload'], encryptionLabel)
+
+		wboDecrypt = wbo;
+		wboDecrypt['payload'] = cleartext;
+
+		return wboDecrypt
+	
 	def decrypt(self, encryptedObject, encryptionLabel=None):
 		"""Given an encrypted object, decrypt it and return the plaintext value.
 		If necessary, will retrieve the private key and bulk encryption key
@@ -926,6 +678,45 @@ class WeaveCryptoContext(object):
 		else:
 			raise WeaveException("Encryption not supported for storage version %s" % self.ctx.version)
 
+
+	def get(self, collection, id, decrypt=True):
+		wbo = self.ctx.get(collection, id)
+
+		if ( decrypt ):
+			wbo = self.decrypt_weave_basic_object(wbo, collection)
+
+		return wbo
+
+		
+	def get_collection_ids(collection, params=None):
+		return self.ctx.get_collection_ids(collection, params=params)
+
+
+	def get_collection(self, collection, decrypt=True):
+		colWbo = self.ctx.get_collection(collection)
+
+		colWboDecrypt
+		if ( decrypt ):
+			for wbo in colWbo:
+				colWboDecrypt.append(self.decrypt_weave_basic_object(wbo))
+			
+			colWbo = colWboDecrypt
+
+		return colWbo
+
+
+	def put(self, collection, id, item, encrypt=True):
+		return self.ctx.put(collection, id, item)
+
+	def put_collection(collection, itemArray):
+		return self.ctx.put_collection(collection, itemArray)
+
+	def delete(collection, id):
+		return self.ctx.delete(collection, id)
+
+	def delete_collection(self, collection, idArray=None, params=None):
+		return self.ctx.delete_collection(collection, idArray=idArray, params=params)
+
 				
 
 # Command-Line helper utilities
@@ -987,12 +778,7 @@ if __name__ == "__main__":
 	parser.add_option("-m", "--modify", help="Update collection, or single item, with given value in JSON format. Requires -c and optionally -i", dest="modify")
 
 
-	# TODO add support for sort, modified, etc.
-
-
 	(options, args) = parser.parse_args()
-
-	# {'username': None, 'verbose': True, 'format': 'text', 'passphrase': None, 'password': None, 'interactive': False}
 
 	if options.credentialfile:
 		if options.username:
@@ -1026,8 +812,8 @@ if __name__ == "__main__":
 		if not ( options.server and options.username and options.password ):
 			print "server, username and password are required arguments. Use -h for help."
 			sys.exit(1)
-	else 
-		if not and not ( options.server and options.username and options.password and options.passphrase ):
+	else: 
+		if not ( options.server and options.username and options.password and options.passphrase ):
 			print "server, username, password and passphrase/synckey are required arguments. Use -h for help."
 			sys.exit(1)
 
@@ -1050,11 +836,8 @@ if __name__ == "__main__":
 	else:
 		rootServer="https://auth.services.mozilla.com"
 
-	storageContext = WeaveStorageContext(options.username, options.password, rootServer=rootServer)
-
-	# Create a crypto context: this will encrypt and decrypt data locally
-	crypto = WeaveCryptoContext(storageContext, options.passphrase)
-
+	weaveClient = WeaveClient(rootServer, options.username, options.password, options.passphrase)
+    
 	# Now do what the user asked for
 
 	if options.modify:
@@ -1067,40 +850,33 @@ if __name__ == "__main__":
 		
 		if options.id:
 			# Single item
-			payload = {u'id': unicode(options.id), u'payload': json.dumps(crypto.encrypt(modifyData, options.collection), ensure_ascii=False)}
-			logging.debug("payload:\n" + pprint.pformat(payload))
-			result = storageContext.add_or_modify_item(options.collection, payload, options.id)
+			logging.debug("payload:\n" + pprint.pformat(modifyData))
+			result = weaveClient.put(options.collection, options.id, modifyData)
 			logging.debug("result:\n" + pprint.pformat(result))
 
 		else:
 			# Collection
-			data_array = json.loads(modifyData)
-			payload_array = crypto.encrypt(data_array, options.collection)
-			logging.debug("payload:\n" + pprint.pformat(payload_array))
-			result = storageContext.add_or_modify_items(options.collection, payload_array)
+			logging.debug("payload:\n" + pprint.pformat(modifyData))
+			result = weaveClient.put_collection(options.collection, modifyData)
 			logging.debug("result:\n" + pprint.pformat(result))
 			
 	elif options.collection:
 		if options.id:
 			# Single item
-			result = storageContext.get_item(options.collection, options.id)
-			logging.debug("item:\n" + pprint.pformat(result))
-			if len(result['payload']) > 0:
+			wbo = weaveClient.get(options.collection, options.id)
+			logging.debug("item:\n" + pprint.pformat(wbo))
+			if len(wbo['payload']) > 0:
 				# Empty length payload is legal: indicates a deleted item
-				itemPlaintext = crypto.decrypt(result['payload'], encryptionLabel=options.collection)
-				#logging.debug("item:\n%s", itemPlaintext)
-				itemObject	  = json.loads(itemPlaintext)
+				itemObject = json.loads(wbo['payload'])
 				formatter.format(itemObject)
 				
 		else:
 			# Collection
-			result = storageContext.get_items(options.collection)
-			logging.debug("collection:\n" + pprint.pformat(result))
-			for item in result:
-				if len(item['payload']) > 0:
-					itemPlaintext = crypto.decrypt(item['payload'], encryptionLabel=options.collection)
-					#logging.debug("item:\n%s", itemPlaintext)
-					itemObject	  = json.loads(itemPlaintext)
+			colWbo = weaveClient.get_collection(options.collection)
+			logging.debug("collection:\n" + pprint.pformat(wbo))
+			for wbo in colWbo:
+				if len(wbo['payload']) > 0:
+					itemObject = json.loads(wbo['payload'])
 					formatter.format(itemObject)
 			
 	else:
