@@ -36,9 +36,11 @@
 ###################### END LICENSE BLOCK ############################
 
 import os
+
 import urllib
-import urllib2
 import httplib
+import requests
+
 import hashlib
 import hmac
 import logging
@@ -49,124 +51,259 @@ import json
 import binascii
 import string
 import pprint
+import hawk
 
-opener = urllib2.build_opener(urllib2.HTTPHandler)
+from urlparse import urlparse
+from hawk.util import parse_normalized_url
 
-class WeaveException(Exception):
-	def __init__(self, value):
-		self.value = value
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
 
-	def __str__(self):
-		return repr(self.value)
+from weaveinclude import WeaveException
+from weaveaccount import WeaveAccountV5Context, WeaveAccountV6Context, TEST_MODE as WA_TEST_MODE
+
+class WeaveAuthBasicContext(object):
+
+	def __init__(self, username, password):
+		self.header_key = "Authorization"
+		self.header_val = "Basic %s" % base64.encodestring('%s:%s' % (username, password))[:-1]
+
+	def get_auth_header(self, method, url, data):
+		return self.header_key, self.header_val
 
 
-import weaveaccount
+class WeaveAuthHawkContext(object):
+	
+	def __init__(self, id, key):
+		self.header_key = "Authorization"
+		
+		self.id  = id
+		self.key = key
+
+		logging.debug("Hawk auth id: '%s', key: '%s'" % (self.id, self.key))
+
+
+	def get_auth_header(self, method, url, data):
+	
+		creds = {
+			'id': self.id,
+			'key': self.key,
+			'algorithm': "sha256",
+		}
+
+		hawk_header = hawk.client.header(url, method, {"credentials": creds, "ext": ""})
+
+		if not self.verify_auth_header(method, url, data, hawk_header['field']):
+			raise WeaveException("Hawk header invalid!")
+
+		return self.header_key, hawk_header['field']
+
+
+	def verify_auth_header(self, method, url, data, header):
+		logging.debug("verify_auth_header()")
+
+		parsed_url = parse_normalized_url(url)
+
+		req = {
+			'method': method,
+			'url': url,
+			'host': parsed_url['hostname'],
+			'port': parsed_url['port'],
+			'headers': {
+				'authorization': header
+			}
+		}
+		
+		logging.debug("hawk auth request:\n" + pprint.pformat(req))
+
+		credentials = {
+			self.id.replace('=', ''): {
+				'id': self.id,
+				'key': self.key,
+				'algorithm': 'sha256',
+			}
+		}
+
+		logging.debug("hawk auth credentials:\n" + pprint.pformat(credentials))
+		
+		server = hawk.Server(req, lambda cid: credentials[cid])
+
+		# This will raise a hawk.util.HawkException if it fails
+		artifacts = server.authenticate({})
+
+		#logging.debug("hawk auth artifacts:\n" + pprint.pformat(artifacts))
+
+		return True
+
 
 class WeaveStorageContext(object):
 	"""An object that encapsulates a server, userID, and password, to simplify
 	storage calls for the client."""
 
-	def __init__(self, rootServer, userID, password):
-		self.url = weaveaccount.WeaveRegistrationContext.get_storage_url(rootServer, userID, password)
-		if self.url[len(self.url)-1] == '/': self.url = self.url[:len(self.url)-1]
-		self.userID = userID
-		self.password = password
-
-		# Get storage version
-		meta = self.get_meta()
-		self.version = int(meta['storageVersion'])
-		if not (self.version == 3 or self.version == 5):
-			raise WeaveException("Storage version %s not supported" % self.version)
-			
-		logging.info("Created WeaveStorageContext (v%s) for %s at %s " % (self.version, self.userID, self.url))
+	storage_version = None
+	api_version     = None
+	
+	storageUrl      = None
+	storageAuth     = None
+	userID          = None
 
 	def http_get(self, url):
-		return storage_http_op("GET", self.userID, self.password, url)
+		return storage_http_op("GET", self.userID, self.storageAuth, url)
 
 	def put(self, collection, item, urlID=None, ifUnmodifiedSince=None):
-		return add_or_modify_item(self.url, self.userID, self.password, collection, item, urlID=urlID, ifUnmodifiedSince=ifUnmodifiedSince)
+		return add_or_modify_item(self.storageUrl, self.userID, self.storageAuth, collection, item, urlID=urlID, ifUnmodifiedSince=ifUnmodifiedSince)
 
 	def put_collection(self, collection, itemArray, ifUnmodifiedSince=None):
-		return add_or_modify_items(self.url, self.userID, self.password, collection, itemArray, ifUnmodifiedSince=ifUnmodifiedSince)
+		return add_or_modify_items(self.storageUrl, self.userID, self.storageAuth, collection, itemArray, ifUnmodifiedSince=ifUnmodifiedSince)
 
 	def delete(self, collection, id, ifUnmodifiedSince=None):
-		return delete_item(self.url, self.userID, self.password, collection, id, ifUnmodifiedSince=ifUnmodifiedSince)
+		return delete_item(self.storageUrl, self.userID, self.storageAuth, collection, id, ifUnmodifiedSince=ifUnmodifiedSince)
 
 	def delete_collection(self, collection, idArray=None, params=None):
-		return delete_items(self.url, self.userID, self.password, collection, idArray=idArray, params=params)
+		return delete_items(self.storageUrl, self.userID, self.storageAuth, collection, idArray=idArray, params=params)
 
 	def delete_items_older_than(self, collection, timestamp):
-		return delete_items_older_than(self.url, self.userID, self.password, collection, timestamp)
+		return delete_items_older_than(self.storageUrl, self.userID, self.storageAuth, collection, timestamp)
 
 	def delete_all(self):
-		return delete_all(self.url, self.userID, self.password)
+		return delete_all(self.storageUrl, self.userID, self.storageAuth)
 
 	def get_collection_counts(self):
-		return get_collection_counts(self.url, self.userID, self.password)
+		return get_collection_counts(self.storageUrl, self.userID, self.storageAuth)
 
 	def get_collection_timestamps(self):
-		return get_collection_timestamps(self.url, self.userID, self.password)
+		return get_collection_timestamps(self.storageUrl, self.userID, self.storageAuth)
 
 	def get_collection_ids(self, collection, params=None, asJSON=True, outputFormat=None):
-		return get_collection_ids(self.url, self.userID, self.password, collection, params=params, asJSON=asJSON, outputFormat=outputFormat)
+		return get_collection_ids(self.storageUrl, self.userID, self.storageAuth, collection, params=params, asJSON=asJSON, outputFormat=outputFormat)
 
 	def get(self, collection, id, asJSON=True):
-		return get_item(self.url, self.userID, self.password, collection, id, asJSON=asJSON, withAuth=True)
+		return get_item(self.storageUrl, self.userID, self.storageAuth, collection, id, asJSON=asJSON)
 
 	def get_collection(self, collection, asJSON=True):
-		return get_items(self.url, self.userID, self.password, collection, asJSON=asJSON, withAuth=True)
+		return get_items(self.storageUrl, self.userID, self.storageAuth, collection, asJSON=asJSON)
 
 	def get_quota(self):
-		return get_quota(self.url, self.userID, self.password)
+		return get_quota(self.storageUrl, self.userID, self.storageAuth)
 
 	def get_meta(self):
 		"""Returns an array of meta information. Storage version 5 only"""
-		item = get_path(self.url, self.userID, self.password, 'meta/global')
+		item = get_path(self.storageUrl, self.userID, self.storageAuth, 'meta/global')
 		return json.loads(item['payload'])
 
 	def get_keys(self):
 		"""Returns storage keys. Storage version 5 only"""
-		item = get_path(self.url, self.userID, self.password, 'crypto/keys')
+		item = get_path(self.storageUrl, self.userID, self.storageAuth, 'crypto/keys')
 		return json.loads(item['payload'])
 
 
-def storage_http_op(method, userID, password, url, payload=None, asJSON=True, ifUnmodifiedSince=None, withConfirmation=None, withAuth=True, outputFormat=None):
+class WeaveStorageV5Context(WeaveStorageContext):
+	"""An object that encapsulates a server, userID, and password, to simplify
+	storage calls for the client."""
+
+	storage_version = 5
+	api_version     = "1.1"
+
+	def __init__(self, server, username, password):
+		
+		account = WeaveAccountV5Context()
+		account.init(server, username, password)
+
+		self.storageUrl  = account.get_storage_url() + "/%s/%s" % (self.storage_version, username)
+		self.storageAuth = WeaveAuthBasicContext(username, password)
+		self.userID      = username
+
+		# Check storage version
+		meta = self.get_meta()
+		if not int(meta['storageVersion']) == self.storage_version:
+			raise WeaveException("Storage version %s not supported" % meta['storageVersion'])
+
+
+class WeaveStorageV6Context(WeaveStorageContext):
+	"""An object that encapsulates a server, userID, and password, to simplify
+	storage calls for the client."""
+
+	#storage_version = 6
+	storage_version = 5
+	api_version     = "1.5"
+	
+	def __init__(self, accountServer, tokenServer, username, password):
+		logging.debug("WeaveStorageV6Context()")
+		
+		self.account = WeaveAccountV6Context()
+		self.account.init(accountServer, tokenServer, username, password)
+		token = self.account.get_auth_token()
+
+		logging.debug("auth token\n:" + pprint.pformat(token))
+		
+		self.storageUrl  = token['api_endpoint']
+
+		#IMPORTANT - ignore urlsafe base64 encoding of id and key. use id as-is and encode key as utf8
+		hawk_id  = token['id']
+		hawk_key = token['key'].encode('utf8')
+
+		self.storageAuth = WeaveAuthHawkContext(hawk_id, hawk_key)
+		self.userID      = username
+
+		# Check storage version
+		meta = self.get_meta()
+		if not int(meta['storageVersion']) == self.storage_version:
+			raise WeaveException("Storage version %s not supported" % meta['storageVersion'])
+
+
+def storage_http_op(method, url, payload=None, asJSON=True, ifUnmodifiedSince=None, withConfirmation=None, withAuth=None, outputFormat=None):
 	"""Generic HTTP helper function.  Sets headers and performs I/O, optionally
 	performing JSON parsing on the result."""
 
-	req = urllib2.Request(url, data=payload)
+	logging.debug("Storage request method: %s url: %s" % (method.upper(), url))
+	
+	if not payload == None:
+		logging.debug("payload:\n" + payload)
+
+	headers = {}
 	if withAuth:
-		base64string = base64.encodestring('%s:%s' % (userID, password))[:-1]
-		req.add_header("Authorization", "Basic %s" % base64string)
+		key, value = withAuth.get_auth_header(method, url, payload)
+		headers[key] = value
 	if ifUnmodifiedSince:
-		req.add_header("X-If-Unmodified-Since", "%s" % ifUnmodifiedSince)
+		headers['X-If-Unmodified-Since'] = "%s" % ifUnmodifiedSince
 	if withConfirmation:
-		req.add_header("X-Confirm-Delete", "true")
+		headers['X-Confirm-Delete'] = "true"
 	if outputFormat:
-		req.add_header("Accept", outputFormat)
+		headers['Accept'] = outputFormat
 
-	req.get_method = lambda: method
+	if len(headers) > 0:
+		logging.debug("headers:\n" + pprint.pformat(headers))
+	
+	method = method.upper()
 
-	try:
-		logging.info("Making %s request to %s%s" % (method, url, " with auth %s" % base64string if withAuth else ""))
-		f = opener.open(req)
-		result = f.read()
-		if asJSON:
-			return json.loads(result)
-		else:
-			return result
-	except urllib2.URLError, e:
-		msg = ""
-		try:
-			msg = e.read()
-		except:
-			pass
-		# TODO process error code
-		logging.debug("Communication error: %s, %s" % (e, msg))
-		raise WeaveException("Unable to communicate with Weave server: %s" % e)
+	res = None
+	if method == 'GET':
+		res = requests.get(url, headers=headers)
+	elif method == 'POST':
+		res = requests.post(url, payload=payload, headers=headers)
+	elif method == 'PUT':
+		res = requests.put(url, payload=payload, headers=headers)		
+	elif method == 'DELETE':
+		res = requests.delete(url, headers=headers)
+	else:
+		raise WeaveException("HTTP method '%s' not supported" % method)
+
+	if res == None:
+		raise WeaveException("Request failed, response object is empty")
+	
+	#raise error for 4XX and 5XX status codes
+	res.raise_for_status()
+
+	logging.debug("response status: %s, content: %s" % (res.status_code, res.text))
+	
+	if asJSON:
+		return res.json()
+	else:
+		return res.text
 
 
-def add_or_modify_item(storageServerURL, userID, password, collection, item, urlID=None, ifUnmodifiedSince=None):
+def add_or_modify_item(storageServerURL, userID, auth, collection, item, urlID=None, ifUnmodifiedSince=None):
 	'''Adds the WBO defined in 'item' to 'collection'.	If the WBO does
 	not contain a payload, will update the provided metadata fields on an
 	already-defined object.
@@ -176,9 +313,9 @@ def add_or_modify_item(storageServerURL, userID, password, collection, item, url
 	logging.debug("add_or_modify_item()")
 
 	if urlID:
-		url = storageServerURL + "/1.0/%s/storage/%s/%s" % (userID, collection, urllib.quote(urlID))
+		url = storageServerURL + "/storage/%s/%s" % (collection, urllib.quote(urlID))
 	else:
-		url = storageServerURL + "/1.0/%s/storage/%s" % (userID, collection)
+		url = storageServerURL + "/storage/%s" % (collection)
 	if type(item) == str:
 		itemJSON = item
 	else:
@@ -186,9 +323,9 @@ def add_or_modify_item(storageServerURL, userID, password, collection, item, url
 
 	logging.debug("payload:\n" + pprint.pformat(itemJSON))
 	
-	return storage_http_op("PUT", userID, password, url, itemJSON, asJSON=False, ifUnmodifiedSince=ifUnmodifiedSince)
+	return storage_http_op("PUT", url, itemJSON, asJSON=False, ifUnmodifiedSince=ifUnmodifiedSince, withAuth=auth)
 
-def add_or_modify_items(storageServerURL, userID, password, collection, itemArray, ifUnmodifiedSince=None):
+def add_or_modify_items(storageServerURL, userID, auth, collection, itemArray, ifUnmodifiedSince=None):
 	'''Adds all the items defined in 'itemArray' to 'collection'; effectively
 	performs an add_or_modifiy_item for each.
 
@@ -203,8 +340,8 @@ def add_or_modify_items(storageServerURL, userID, password, collection, itemArra
 	}
 	'''
 	logging.debug("add_or_modify_items()")
-	
-	url = storageServerURL + "/1.0/%s/storage/%s" % (userID, collection)
+
+	url = storageServerURL + "/storage/%s" % (collection)
 	if type(itemArray) == str:
 		itemArrayJSON = itemArray
 	else:
@@ -212,88 +349,96 @@ def add_or_modify_items(storageServerURL, userID, password, collection, itemArra
 
 	logging.debug("payload:\n" + pprint.pformat(itemArrayJSON))
 	
-	return storage_http_op("POST", userID, password, url, itemArrayJSON, ifUnmodifiedSince=ifUnmodifiedSince)
+	return storage_http_op("POST", url, itemArrayJSON, ifUnmodifiedSince=ifUnmodifiedSince, withAuth=auth)
 
 
-def delete_item(storageServerURL, userID, password, collection, id, ifUnmodifiedSince=None):
+def delete_item(storageServerURL, userID, auth, collection, id, ifUnmodifiedSince=None):
 	"""Deletes the item identified by collection and id."""
 
-	url = storageServerURL + "/1.0/%s/storage/%s/%s" % (userID, collection, urllib.quote(id))
-	return storage_http_op("DELETE", userID, password, url, ifUnmodifiedSince=ifUnmodifiedSince)
+	url = storageServerURL + "/storage/%s/%s" % (collection, urllib.quote(id))
+	return storage_http_op("DELETE", url, ifUnmodifiedSince=ifUnmodifiedSince, withAuth=auth)
 
-def delete_items(storageServerURL, userID, password, collection, idArray=None, params=None):
+def delete_items(storageServerURL, userID, auth, collection, idArray=None, params=None):
 	"""Deletes the item identified by collection, idArray, and optional parameters."""
+
 	# TODO: Replace params with named arguments.
 
 	if params:
 		if idArray:
-			url = storageServerURL + "/1.0/%s/storage/%s?ids=%s&%s" % (userID, collection, urllib.quote(','.join(idArray)), params)
+			url = storageServerURL + "/storage/%s?ids=%s&%s" % (collection, urllib.quote(','.join(idArray)), params)
 		else:
-			url = storageServerURL + "/1.0/%s/storage/%s?%s" % (userID, collection, params)
+			url = storageServerURL + "/storage/%s?%s" % (collection, params)
 	else:
 		if idArray:
-			url = storageServerURL + "/1.0/%s/storage/%s?ids=%s" % (userID, collection, urllib.quote(','.join(idArray)))
+			url = storageServerURL + "/storage/%s?ids=%s" % (collection, urllib.quote(','.join(idArray)))
 		else:
-			url = storageServerURL + "/1.0/%s/storage/%s" % (userID, collection)
-	return storage_http_op("DELETE", userID, password, url)
+			url = storageServerURL + "/storage/%s" % (collection)
+			
+	return storage_http_op("DELETE", url, withAuth=auth)
 
-def delete_items_older_than(storageServerURL, userID, password, collection, timestamp):
+def delete_items_older_than(storageServerURL, userID, auth, collection, timestamp):
 	"""Deletes all items in the given collection older than the provided timestamp."""
-	url = storageServerURL + "/1.0/%s/storage/%s?older=%s" % (userID, collection, timestamp)
-	return storage_http_op("DELETE", userID, password, url)
 
-def delete_all(storageServerURL, userID, password, confirm=True):
+	url = storageServerURL + "/storage/%s?older=%s" % (collection, timestamp)
+	return storage_http_op("DELETE", url, withAuth=auth)
+
+def delete_all(storageServerURL, userID, auth, confirm=True):
 	"""Deletes all items in the given collection."""
+
 	# The only reason you'd want confirm=False is for unit testing
-	url = storageServerURL + "/1.0/%s/storage" % (userID)
-	return storage_http_op("DELETE", userID, password, url, asJSON=False, withConfirmation=confirm)
+	url = storageServerURL + "/storage"
+	return storage_http_op("DELETE", url, asJSON=False, withConfirmation=confirm, withAuth=auth)
 
-def get_collection_counts(storageServerURL, userID, password):
+def get_collection_counts(storageServerURL, userID, auth):
 	"""Returns a map of all collection names and the number of objects in each."""
-	url = storageServerURL + "/1.0/%s/info/collection_counts" % (userID)
-	return storage_http_op("GET", userID, password, url)
 
-def get_collection_timestamps(storageServerURL, userID, password):
+	url = storageServerURL + "/info/collection_counts"
+	return storage_http_op("GET", url, withAuth=auth)
+
+def get_collection_timestamps(storageServerURL, userID, auth):
 	"""Returns a map of the modified timestamp for each of the collections."""
-	url = storageServerURL + "/1.0/%s/info/collections" % (userID)
-	return storage_http_op("GET", userID, password, url)
 
-def get_collection_ids(storageServerURL, userID, password, collection, params=None, asJSON=True, outputFormat=None):
+	url = storageServerURL + "/info/collections"
+	return storage_http_op("GET", url, withAuth=auth)
+
+def get_collection_ids(storageServerURL, userID, auth, collection, params=None, asJSON=True, outputFormat=None):
 	"""Returns a list of IDs for objects in the specified collection."""
+
 	# TODO replace params with named arguments
 	if params:
-		url = storageServerURL + "/1.0/%s/storage/%s?%s" % (userID, collection, params)
+		url = storageServerURL + "/storage/%s?%s" % (collection, params)
 	else:
-		url = storageServerURL + "/1.0/%s/storage/%s" % (userID, collection)
-	return storage_http_op("GET", userID, password, url, asJSON=asJSON, outputFormat=outputFormat)
+		url = storageServerURL + "/storage/%s" % (collection)
+	return storage_http_op("GET", url, asJSON=asJSON, outputFormat=outputFormat, withAuth=auth)
 
-def get_items(storageServerURL, userID, password, collection, asJSON=True, withAuth=True):
+def get_items(storageServerURL, userID, auth, collection, asJSON=True):
 	"""Returns all the items in the given collection."""
-	
 	logging.debug("get_items()")
 
 	# The only reason to set withFalse=False is for unit testing
-	url = storageServerURL + "/1.0/%s/storage/%s?full=1" % (userID, collection)
-	return storage_http_op("GET", userID, password, url, asJSON=asJSON, withAuth=withAuth)
+	url = storageServerURL + "/storage/%s?full=1" % (collection)
+	return storage_http_op("GET", url, asJSON=asJSON, withAuth=auth)
 
-def get_item(storageServerURL, userID, password, collection, id, asJSON=True, withAuth=True):
+def get_item(storageServerURL, userID, auth, collection, id, asJSON=True):
 	"""Returns the specified item."""
+
 	# The only reason to set withFalse=False is for unit testing
-	url = storageServerURL + "/1.0/%s/storage/%s/%s?full=1" % (userID, collection, id)
-	return storage_http_op("GET", userID, password, url, asJSON=asJSON, withAuth=withAuth)
+	url = storageServerURL + "/storage/%s/%s?full=1" % (collection, id)
+	return storage_http_op("GET", url, asJSON=asJSON, withAuth=auth)
 
-def get_quota(storageServerURL, userID, password):
+def get_quota(storageServerURL, userID, auth):
 	"Returns an array of [<amount used>,<limit>].  Not implemented by Weave 1.0 production servers."
-	url = storageServerURL + "/1.0/%s/info/quota" % (userID)
-	return storage_http_op("GET", userID, password, url)
 
-def get_path(storageServerURL, userID, password, path):
-	"Returns JSON object at given path"	   
-	url = storageServerURL + "/1.0/%s/storage/%s" % (userID, path)
-	return storage_http_op("GET", userID, password, url)
+	url = storageServerURL + "/info/quota"
+	return storage_http_op("GET", url, withAuth=auth)
+
+def get_path(storageServerURL, userID, auth, path):
+	"Returns JSON object at given path"
+
+	url = storageServerURL + "/storage/%s" % (path)
+	return storage_http_op("GET", url, withAuth=auth)
 
 
-	
 # Crypto implementation:
 from PBKDF2 import PBKDF2
 from M2Crypto.EVP import Cipher, RSA, load_key_string
@@ -306,14 +451,14 @@ M2Crypto_Encrypt = 1
 class WeaveClient(object):
 	"""Encapsulates the cryptographic context for a user and their collections."""
 
-	def __init__(self, rootServer, userID, password, passphrase):
-		self.ctx = WeaveStorageContext(rootServer, userID, password)
-		self.passphrase = passphrase
-		self.privateKey = None
-		self.privateHmac = None
-		self.bulkKeys = {}
-		self.bulkKeyIVs = {}
-		self.bulkKeyHmacs = {}
+	ctx          = None
+	passphrase   = None
+	privateKey   = None
+	privateHmac  = None
+	bulkKeys     = None
+	bulkKeyIVs   = None
+	bulkKeyHmacs = None
+
 
 	def fetchPrivateKey(self):
 		"""Fetch the private key for the user and storage context
@@ -322,7 +467,7 @@ class WeaveClient(object):
 		storage for later use."""
 		logging.debug("fetchPrivateKey()")
 
-		if self.ctx.version == 5:
+		if self.ctx.storage_version == 5:
 
 			# Generate key pair using SHA-256 HMAC-based HKDF of sync key
 			# See https://docs.services.mozilla.com/sync/storageformat5.html#the-sync-key
@@ -354,7 +499,7 @@ class WeaveClient(object):
 			logging.debug("sync key: %s, crypt key: %s, crypt hmac: %s" % (binascii.hexlify(syncKey), binascii.hexlify(self.privateKey), binascii.hexlify(self.privateHmac)))
 
 			
-		elif self.ctx.version == 3:
+		elif self.ctx.storage_version == 3:
 
 			# Retrieve encrypted private key from the server
 			logging.info("Fetching encrypted private key from server")
@@ -419,7 +564,7 @@ class WeaveClient(object):
 			logging.debug("Successfully decrypted private key")
 
 		else:
-			raise WeaveException("Storage version %s not supported" % self.ctx.version)
+			raise WeaveException("Storage version %s not supported" % self.ctx.storage_version)
 
 
 	def fetchBulkKey(self, label):
@@ -432,7 +577,7 @@ class WeaveClient(object):
 		if label in self.bulkKeys:
 			return
 
-		if self.ctx.version == 5:
+		if self.ctx.storage_version == 5:
 
 			logging.info("Fetching encrypted bulk key for %s" % label)
 
@@ -453,7 +598,7 @@ class WeaveClient(object):
 
 			logging.debug("Successfully decrypted bulk key for %s" % label)
 
-		elif self.ctx.version == 3:
+		elif self.ctx.storage_version == 3:
 
 			logging.info("Fetching encrypted bulk key from %s" % label)
 
@@ -529,7 +674,7 @@ class WeaveClient(object):
 
 		v = None
 		
-		if self.ctx.version == 5:
+		if self.ctx.storage_version == 5:
 
 			# An encrypted object has three relevant fields
 			ciphertext	= base64.decodestring(encryptedObject['ciphertext'])
@@ -578,7 +723,7 @@ class WeaveClient(object):
 			del cipher
 			logging.debug("Successfully decrypted v5 data record")
 			
-		elif self.ctx.version == 3:
+		elif self.ctx.storage_version == 3:
 			
 			# An encrypted object has two relevant fields
 			encryptionLabel = encryptedObject['encryption']
@@ -602,7 +747,7 @@ class WeaveClient(object):
 			logging.debug("Successfully decrypted v3 data record")
 
 		else:
-			raise WeaveException("Storage version %s not supported" % self.ctx.version)
+			raise WeaveException("Storage version %s not supported" % self.ctx.storage_version)
 
 		
 		return v
@@ -614,7 +759,7 @@ class WeaveClient(object):
 		logging.debug("encrypt()")
 		logging.debug("plaintext:\n" + pprint.pformat(plaintextData))
 		
-		if self.ctx.version == 5:
+		if self.ctx.storage_version == 5:
 
 			crypt_key	= None
 			hmac_key	= None
@@ -676,7 +821,7 @@ class WeaveClient(object):
 			return encryptedData
 
 		else:
-			raise WeaveException("Encryption not supported for storage version %s" % self.ctx.version)
+			raise WeaveException("Encryption not supported for storage version %s" % self.ctx.storage_version)
 
 
 	def get(self, collection, id, decrypt=True):
@@ -695,10 +840,10 @@ class WeaveClient(object):
 	def get_collection(self, collection, decrypt=True):
 		colWbo = self.ctx.get_collection(collection)
 
-		colWboDecrypt
+		colWboDecrypt = []
 		if ( decrypt ):
 			for wbo in colWbo:
-				colWboDecrypt.append(self.decrypt_weave_basic_object(wbo))
+				colWboDecrypt.append(self.decrypt_weave_basic_object(wbo, collection))
 			
 			colWbo = colWboDecrypt
 
@@ -718,6 +863,56 @@ class WeaveClient(object):
 		return self.ctx.delete_collection(collection, idArray=idArray, params=params)
 
 				
+class WeaveClientV5(WeaveClient):
+	"""Encapsulates the cryptographic context for a user and their collections."""
+
+	def __init__(self, rootServer, userID, password, passphrase):
+		self.ctx          = WeaveStorageV5Context(rootServer, userID, password)
+		self.passphrase   = passphrase
+		self.privateKey   = None
+		self.privateHmac  = None
+		self.bulkKeys     = {}
+		self.bulkKeyIVs   = {}
+		self.bulkKeyHmacs = {}
+
+
+class WeaveClientV6(WeaveClient):
+	"""Encapsulates the cryptographic context for a user and their collections."""
+
+	def __init__(self, account_server, token_server, username, password, synckey=None):
+		logging.debug("WeaveClientV6()")
+		
+		self.ctx          = WeaveStorageV6Context(account_server, token_server, username, password)
+		self.passphrase   = synckey
+		self.privateKey   = None
+		self.privateHmac  = None
+		self.bulkKeys     = {}
+		self.bulkKeyIVs   = {}
+		self.bulkKeyHmacs = {}
+
+		if self.passphrase == None:
+			self.passphrase = self.ctx.account.synckey
+
+		logging.debug("synckey: %s" % self.passphrase)
+			
+	def fetchPrivateKey(self):
+		logging.debug("fetchPrivateKey()")
+
+		kdf = HKDF(
+			algorithm=hashes.SHA256(),
+			length=2*32,
+			salt=b"",
+			info=b"identity.mozilla.com/picl/v1/oldsync",
+			backend=default_backend()
+		)
+		key = kdf.derive(binascii.unhexlify(self.passphrase))
+
+		self.privateKey  = key[:32]
+		self.privateHmac = key[32:]
+
+		logging.info("Successfully generated sync key and hmac key")
+		logging.debug("sync key: %s, crypt key: %s, crypt hmac: %s" % (self.passphrase, binascii.hexlify(self.privateKey), binascii.hexlify(self.privateHmac)))
+
 
 # Command-Line helper utilities
 
@@ -764,18 +959,21 @@ if __name__ == "__main__":
 
 	# process arguments
 	parser = OptionParser()
-	parser.add_option("-s", "--server", help="server URL, if you aren't using services.mozilla.com", dest="server")
+	parser.add_option("-s", "--account-server", help="account server url if you are not using defaults", dest="account_server")
+	parser.add_option("-t", "--token-server", help="sync token server url if you are not using defaults", dest="token_server")
+
 	parser.add_option("-u", "--user", help="username", dest="username")
 	parser.add_option("-p", "--password", help="password (sent securely to server)", dest="password")
-	parser.add_option("-k", "--passphrase", help="passphrase (used locally)", dest="passphrase")
-	parser.add_option("-K", "--credentialfile", help="get username, password, and passphrase from this credential file (as name=value lines)", dest="credentialfile")
-	parser.add_option("-a", "--authenticate", help="get authentication token from v6 token server", dest="authenticate")    
+	parser.add_option("-k", "--passphrase", help="synckey (used locally)", dest="synckey")
+	parser.add_option("-K", "--credentialfile", help="get username, password, and synckey from this credential file (as name=value lines)", dest="credentialfile")
 	parser.add_option("-c", "--collection", help="collection", dest="collection")
 	parser.add_option("-i", "--id", help="object ID", dest="id")
 	parser.add_option("-f", "--format", help="format (default is text; options are text, json, xml)", default="text", dest="format")
-	parser.add_option("-v", "--verbose", help="print verbose logging", action="store_true", dest="verbose")
+	parser.add_option("-v", "--storage-version", help="weave client version (5|6). Defaults to v5", dest="storage_version")
 	parser.add_option("-l", "--log-level", help="set log level (critical|error|warn|info|debug)", dest="loglevel")
 	parser.add_option("-m", "--modify", help="Update collection, or single item, with given value in JSON format. Requires -c and optionally -i", dest="modify")
+	parser.add_option("", "--plaintext", help="Plaintext collection, don't decrypt", action="store_true", dest="plaintext")
+	parser.add_option("", "--test-mode", help="use test data", action="store_true", dest="testmode")
 
 
 	(options, args) = parser.parse_args()
@@ -787,8 +985,8 @@ if __name__ == "__main__":
 		if options.password:
 			print "The 'password' option must not be used when a credential file is provided."
 			sys.exit(1)
-		if options.passphrase:
-			print "The 'passphrase' option must not be used when a credential file is provided."
+		if options.synckey:
+			print "The 'synckey' option must not be used when a credential file is provided."
 			sys.exit(1)
 		try:
 			credFile = open(options.credentialfile, "r")
@@ -800,21 +998,12 @@ if __name__ == "__main__":
 						options.username = value.strip()
 					elif key == 'password':
 						options.password = value.strip()
-					elif key == 'passphrase':
-						options.passphrase = value.strip()
+					elif key == 'synckey':
+						options.synckey = value.strip()
 		except Exception, e:
 			import traceback
 			traceback.print_exc(e)
 			print e
-			sys.exit(1)
-
-	if options.authenticate:
-		if not ( options.server and options.username and options.password ):
-			print "server, username and password are required arguments. Use -h for help."
-			sys.exit(1)
-	else: 
-		if not ( options.server and options.username and options.password and options.passphrase ):
-			print "server, username, password and passphrase/synckey are required arguments. Use -h for help."
 			sys.exit(1)
 
 	if options.modify and not options.collection:
@@ -823,21 +1012,64 @@ if __name__ == "__main__":
 
 	formatter = FORMATTERS[options.format]
 
+	if options.testmode:
+		# print "weaveaccount.TEST_MODE: " + str(wa_get_test_mode())
+		# wa_set_test_mode(True)		
+		# print "weaveaccount.TEST_MODE: " + str(wa_get_test_mode())
+		
+		print "weaveaccount.TEST_MODE: " + str(WA_TEST_MODE)
+		WA_TEST_MODE = True
+		print "weaveaccount.TEST_MODE: " + str(WA_TEST_MODE)
+
 	if options.loglevel:
 		logging.basicConfig(level = str.upper(options.loglevel))
-	elif options.verbose:
-		logging.basicConfig(level = logging.DEBUG)
 	else:
 		logging.basicConfig(level = logging.ERROR)
 
-	# Create a storage context: this will control all the sending and retrieving of data from the server
-	if options.server:
-		rootServer = options.server
+	if options.plaintext:
+		decrypt=False
 	else:
-		rootServer="https://auth.services.mozilla.com"
+		decrypt=True
+	
+	if options.storage_version:
+		storage_version = int(options.storage_version)
+	else:
+		storage_version = 5
 
-	weaveClient = WeaveClient(rootServer, options.username, options.password, options.passphrase)
-    
+	if options.synckey:
+		synckey = options.synckey
+	else:
+		synckey = None
+
+	if storage_version == 6:
+
+		if options.account_server:
+			account_server = options.account_server
+		else:
+			account_server="https://api.accounts.firefox.com"
+
+		if options.token_server:
+			token_server = options.token_server
+		else:
+			token_server="https://token.services.mozilla.com"
+
+		weaveClient = WeaveClientV6(account_server, token_server, options.username, options.password, synckey=synckey)
+	
+	elif storage_version == 5:
+
+		if options.account_server:
+			account_server = options.account_server
+		else:
+			account_server="https://auth.services.mozilla.com"
+		
+		weaveClient = WeaveClientV5(account_server, options.username, options.password, synckey)
+	else:
+		raise WeaveException("Storage version '%s' not supported" % storage_version)
+		
+
+	#DEBUG only
+	#sys.exit(0)
+	
 	# Now do what the user asked for
 
 	if options.modify:
@@ -863,7 +1095,7 @@ if __name__ == "__main__":
 	elif options.collection:
 		if options.id:
 			# Single item
-			wbo = weaveClient.get(options.collection, options.id)
+			wbo = weaveClient.get(options.collection, options.id, decrypt=decrypt)
 			logging.debug("item:\n" + pprint.pformat(wbo))
 			if len(wbo['payload']) > 0:
 				# Empty length payload is legal: indicates a deleted item
@@ -872,8 +1104,8 @@ if __name__ == "__main__":
 				
 		else:
 			# Collection
-			colWbo = weaveClient.get_collection(options.collection)
-			logging.debug("collection:\n" + pprint.pformat(wbo))
+			colWbo = weaveClient.get_collection(options.collection, decrypt=decrypt)
+			logging.debug("collection:\n" + pprint.pformat(colWbo))
 			for wbo in colWbo:
 				if len(wbo['payload']) > 0:
 					itemObject = json.loads(wbo['payload'])

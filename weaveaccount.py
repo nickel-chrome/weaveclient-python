@@ -38,6 +38,8 @@
 import os
 import urllib
 import urllib2
+import requests
+
 import httplib
 import hashlib
 import hmac
@@ -49,10 +51,67 @@ import json
 import binascii
 import string
 import pprint
+import datetime
+import time
+
+from urlparse import urlparse
+
+from cryptography.hazmat.primitives import interfaces as crypto_interfaces
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.backends import openssl
+
+from fxa.core import Client
+
+from browserid import jwt, LocalVerifier
+from browserid.crypto import RSKey
+from browserid.utils import bundle_certs_and_assertion, unbundle_certs_and_assertion, get_assertion_info, to_int
+
+from fxa_client.fxa_crypto import dumpCert, createAssertion, createBackedAssertion, verifyBackedAssertion
+
+from weaveinclude import WeaveException, trim_str
 
 opener = urllib2.build_opener(urllib2.HTTPHandler)
 
-############ WEAVE USER API ###############
+TEST_MODE = False
+
+
+def set_test_mode(test_mode):
+	TEST_MODE = test_mode
+
+def get_test_mode():
+	return TEST_MODE
+
+############ TEST DATA ################
+TEST_KEY_DATA = {
+	"algorithm": "RS",
+	"e": trim_str("65537", True),
+	"n": trim_str("""209243035644587250401544600980086312241568079755560
+				  305799762634866415404663608185897137992156763240716044
+				  835079029321020920839266474885928107865975645564079502
+				  981832839660437041327486507875095992587448154572518952
+				  353171418459412971288178331981587134721539194774559879
+				  419636721646390043268846144379060232150404309749170094
+				  874344199116271093479336726912962005140109609562500491
+				  986525845020604223869841300953848164692141191106673921
+				  873690576182194792161074852303575862501654210649197729
+				  323552815813234047825816132375936584216835454534542565
+				  653603107918395618982740825322497898026112880305190321
+				  00136717907495704416146033""", True),
+	"d": trim_str("""144813408726849625653643872417928420042736216083631
+				  365338050777875642820228684201103750368650599055635101
+				  478320331002541250080208271684713080984437147807344767
+				  333673987342698672253701047312063856078076291971645667
+				  666856829379794530398368930584079949792710274461597455
+				  648510959972463084861147970926362740889051327974425117
+				  482063498794195113160448742236665194358741505749709381
+				  644695552875442234994058219788340536697858322121222831
+				  900226567432616987092016513571904641884936803536775772
+				  144713996142675890723849665606850078394691041559842722
+				  140634996306232264935562495882403578622375767344422019
+				  12990977046205516997686321""", True),
+}
+
+############ WEAVE SYNC V5 USER API ###############
 
 def createUser(serverURL, userID, password, email, secret = None, captchaChallenge = None, captchaResponse = None):
 	"""Create a new user at the given server, with the given userID, password, and email.
@@ -139,6 +198,9 @@ def getUserStorageNode(serverURL, userID, password):
 		f = opener.open(req)
 		result = f.read()
 		f.close()
+
+		#trim unecessary trailing slash
+		if result[len(result)-1] == '/': result = result[:len(result)-1]
 		return result
 
 	except urllib2.URLError, e:
@@ -199,7 +261,6 @@ def changeUserPassword(serverURL, userID, password, newpassword):
 		raise WeaveException("Unable to communicate with Weave server: %s" % e)
 
 
-
 def deleteUser(serverURL, userID, password):
 	"""Delete the given user."""
 
@@ -249,71 +310,422 @@ def setUserProfile(serverURL, userID, profileField, profileValue):
 		raise WeaveException("Unable to communicate with Weave server: %s" % e)
 
 
+# Weave Sync V5 User API object interface
+class WeaveAccountV5Context(object):
 
-def _buildOnePwAuthTokenRequest(userID, password):
-	"""Build the get Auth Token request body"""
+	server   = None
+	username = None
+	password = None
+
+	def init(self, server, username, password):
+		self.server   = server
+		self.username = username
+		self.password = password
+
+	def get_storage_url(self):
+		return getUserStorageNode(self.server, self.username, self.password)
+
+
+############ WEAVE SYNC V6 FXA API ###############
+
+def getSyncAuthToken(session, server, synckey, audience=None, keypair=None, certificate=None):
+	# build browserid assertion then then request sync auth token from token server
+	#
+	# GET /1.0/sync/1.5
+	# Host: token.services.mozilla.com
+	# Authorization: BrowserID <assertion>
+
+	if ( audience == None ):
+		parsed_url = urlparse(server)
+		audience = parsed_url.scheme + "://" + parsed_url.netloc
 		
-	logging.debug("_buildOnePwAuthTokenRequest()")
+	if ( keypair == None ):
+		if ( certificate != None ):
+			raise WeaveException("certificate param is invalid without keypair!")
+		
+		keypair = create_fxa_keypair()
 
-	quickStretchPW = PBKDF2(password, userID, iterations=1000).read(32)
+	pubkey, privkey = keypair
+
+	#print "privkey:\n" + pprint.pformat(privkey.get_data())
+	#print "pubkey:\n" + pprint.pformat(pubkey.get_data())
+	
+	if ( certificate == None ):
+		certificate = session.sign_certificate(pubkey.get_data())
+
+	#print "certificate:\n" + pprint.pformat(certificate)
+	logging.debug("certificate:\n" + pprint.pformat(decode_certificate(certificate)))
+	
+	assertion = build_assertion(keypair, certificate, audience)
+	#assertion = build_assertion(keypair, certificate, audience, new_style=False)
+
+	#print "browserid assertion:\n" + pprint.pformat(assertion)
+	logging.debug("browserid assertion:\n" + pprint.pformat(get_assertion_info(assertion)))
+	
+	if not verify_assertion(audience, assertion, local=False):
+		raise WeaveException("Failed to verify assertion for audience '%s'" % audience)
+
+	client_state = build_client_state_header(synckey)
+	logging.debug("clientstate: %s" % client_state)
+
+	url = server + "/1.0/sync/1.5"
+
+	logging.debug("token server: " + url)
+	
+	headers = {
+		'Content-Type': "application/json",
+		'Authorization': "BrowserID %s" % assertion,
+		'X-Client-State': client_state,
+	}
+
+	res = requests.get(url, headers=headers)
+
+	if res == None:
+		raise WeaveException("Request failed, response object is empty")
+	
+	#raise error for 4XX and 5XX status codes
+	res.raise_for_status()
+
+	logging.debug("response status: %s, content: %s" % (res.status_code, res.text))
+	
+	return res.json()
 
 
-def getOnePwAuthToken(serverURL, userID, password):
-	"""Returns the auth token for the given user."""
+def getFxASession(server, username, password, fetch_keys=False):
+	client  = Client(server)
+	session = client.login(username, password, keys=fetch_keys)
+	return session
 
-	if userID.find('"') >=0:
-		raise ValueError("Weave userIDs may not contain the quote character")
 
-	url = serverURL + "/account/login"
+def build_assertion(keypair, certificate, audience, exp=None, new_style=True):
+	"""
+	Generate a new assertion for the given email address.
 
-	payload = _buildOnePwAuthTokenRequest(userID, password)
-	req = urllib2.Request(url, data=payload)
-	req.get_method = lambda: 'POST'
-	try:
+	This method lets you generate BrowserID assertions. Called with just
+	an email and audience it will generate an assertion from
+	login.persona.org.
+	"""
+	logging.debug("build_assertion()")
 
-		f = opener.open(req)
-		result = f.read()
-		if result != "success":
-			raise WeaveException("Unable to get auth token: got return value '%s' from server" % result)
+	#Default expiry to 5 minutes
+	if exp is None:
+		exp = int((time.time() + (5*60)) * 1000)
 
-	except urllib2.URLError, e:
-		raise WeaveException("Unable to communicate with token server: %s" % e)
+	pubkey, privkey = keypair
 
-	try:
-		f = opener.open(req)
-		result = f.read()
-		f.close()
-		return result
+	#TODO - verify keypair matches certificate
 
-	except urllib2.URLError, e:
-		if str(e).find("404") >= 0:
-			return serverURL
+	# Generate the assertion, signed with email's public key.
+	assertion = {
+		"exp": exp,
+		"aud": audience,
+	}
+	assertion = jwt.generate(assertion, privkey.get_key())
+
+	#print "assertion:\n" + assertion
+
+	# Combine them into a BrowserID bundled assertion.
+	return bundle_certs_and_assertion([certificate], assertion, new_style)
+
+def verify_assertion(audience, assertion, local=True):
+
+	if local:
+
+		v = LocalVerifier(["*"], warning=False)
+		result = v.verify(assertion)
+
+	else:
+		url		= "https://verifier.accounts.firefox.com/v2"
+		payload = json.dumps({"audience": audience, "assertion": assertion})
+
+		req = urllib2.Request(url, data=payload)
+		req.add_header("Content-Type", "application/json")
+		req.get_method = lambda: 'POST'
+
+		try:
+			f = opener.open(req)
+			result = json.loads(f.read())
+			f.close()
+
+		except urllib2.URLError, e:
+			raise WeaveException("FxA sync auth token request failed: " + str(e) + " " + e.read())
+
+	if (result['status'] == 'okay'):
+		return True
+	else:
+		logging.debug(pprint.pformat(result))
+		return False
+
+
+def build_client_state_header(synckey):
+	key_bytes = binascii.unhexlify(synckey)
+	m = hashlib.sha256()
+	m.update(key_bytes)
+	client_state = binascii.hexlify(m.digest()[:16])
+	return client_state
+
+	
+def decode_certificate(cert, include_sig=False):
+	logging.debug("decode_certificate()")
+	
+	pieces = cert.split(".")
+
+	for i in range(len(pieces)):
+		#print pprint.pformat(pieces[i])
+		if (len(pieces[i]) % 3) > 0:
+			pieces[i] = pieces[i] + (3 - len(pieces[i]) %3) * "="
+		
+	header = json.loads(base64.decodestring(pieces[0]))
+	payload = json.loads(base64.decodestring(pieces[1]))
+
+	if include_sig:
+		signature = pieces[2]
+		return header, payload, signature
+	else:
+		return header, payload
+		
+
+def rsa_to_jwt_data(key):
+
+	if isinstance(key, crypto_interfaces.RSAPublicKeyWithNumbers):
+		pubkey_numbers = key.public_numbers()
+		jwt_data = {
+			"algorithm": "RS",
+			"n": str(pubkey_numbers.n),
+			"e": str(pubkey_numbers.e),
+		}
+
+	elif isinstance(key, crypto_interfaces.RSAPrivateKeyWithNumbers):
+		privkey_numbers = key.private_numbers()
+		pubkey_numbers = privkey_numbers.public_numbers
+		jwt_data = {
+			"algorithm": "RS",
+			"n": str(pubkey_numbers.n),
+			"e": str(pubkey_numbers.e),
+			"d": str(privkey_numbers.d),
+		}
+
+	else:
+		raise WeaveException("Key '%s' not recognised" % key.__name__)
+
+	return jwt_data
+
+
+def rsa_to_jwt_key(key, digest_size=None):
+	return jwt_data_to_jwt_key(rsa_to_jwt_data(key), digest_size)
+	
+def jwt_data_to_jwt_key(data, digest_size=None):
+
+	if digest_size == None:
+		digest_size = 256
+
+	if data['algorithm'] == "RS":
+		if digest_size == 256:
+			jwt_key = jwt.RS256Key(data)
+
 		else:
-			raise WeaveException("Unable to communicate with token server: " + str(e))
+			raise WeaveException("Digest size '%s' not recognised" % digest_size)
+
+	elif data['algorithm'] == "DS":
+		if digest_size == 256:
+			jwt_key = jwt.DS256Key(data)
+
+		else:
+			raise WeaveException("Digest size '%s' not recognised" % digest_size)
+		
+	return jwt_key
 
 
-# User API v1.0 implementation
+def create_fxa_keypair():
 
-class WeaveRegistrationContext:
+	if TEST_MODE:
+		jwt_data = TEST_KEY_DATA
+		jwt_privkey = JWTKey(jwt_data)
+		if jwt_data['algorithm'] == "RS":
+			del jwt_data['d']
+		elif jwt_data['algorithm'] == "DS":
+			del jwt_data['x']
+		else:
+			raise WeaveException("Algorithm '%s' not recongisied" % jwt_data['algorithm'])
 
-	@staticmethod
-	def get_storage_url(rootServer, userID, password):
-		return getUserStorageNode(rootServer, userID, password)
+		jwt_pubkey = JWTKey(jwt_data)
+
+	else:
+		# generate an RSA key pair
+		privkey = rsa.generate_private_key(65537, 2048, openssl.backend)
+		pubkey = privkey.public_key()
+		
+		#Convert to JWT
+		jwt_pubkey  = JWTKey(pubkey)
+		jwt_privkey = JWTKey(privkey)
 
 
-# OnePw implementation:
-from PBKDF2 import PBKDF2
-from M2Crypto.EVP import Cipher, RSA, load_key_string
-import M2Crypto.m2
+	return jwt_pubkey, jwt_privkey
 
-M2Crypto_Decrypt = 0
-M2Crypto_Encrypt = 1
 
-class WeaveAccountOnePwContext(object):
+class JWTKey(object):
+
+	jwt_data = None
+	jwt_key  = None
+	
+	def __init__(self, key):
+		logging.debug("JWTKey()")
+		
+		if (isinstance(key, crypto_interfaces.RSAPublicKeyWithNumbers)
+			or isinstance(key, crypto_interfaces.RSAPrivateKeyWithNumbers)):
+		
+			self.jwt_data = rsa_to_jwt_data(key)
+		
+		elif isinstance(key, dict) and "algorithm" in key:
+			self.jwt_data = key
+		
+		else:
+			raise WeaveException("Invalid key '%s'" % type(key))
+	
+		self.jwt_key = jwt_data_to_jwt_key(self.jwt_data)
+
+
+	def get_data(self):
+		return self.jwt_data
+
+	
+	def get_key(self):
+		return self.jwt_key
+
+
+# Weave Sync V6 FxA API object interface
+class WeaveAccountV6Context(object):
 	"""Encapsulates the cryptographic context for the OnePw account and token server."""
 
-	def __init__(self, username, password):
-		self.username  = None
-		self.password  = None
-		self.authToken = None
+	account_server = None
+	token_server   = None
+	username       = None
+	password       = None
+	synckey        = None
+	client         = None
+	session        = None
+
+
+	def init(self, account_server, token_server, username, password, synckey=None):
+		logging.debug("init()")
+		
+		self.account_server = account_server
+		self.token_server   = token_server
+		self.username       = username
+		self.password       = password
+		self.synckey        = synckey
+		
+		self.client       = Client(account_server)
+		self.session      = self.client.login(self.username, self.password, keys=(self.synckey == None))
+
+		if self.synckey == None:
+			self.synckey = binascii.hexlify(self.session.fetch_keys()[1])
+
+		logging.debug("synckey: %s" % self.synckey)
+
+		
+	def get_auth_token(self, audience=None, keypair=None, certificate=None):		
+		return getSyncAuthToken(self.session, self.token_server, self.synckey, audience=audience, keypair=keypair, certificate=certificate)
+	
+
+############ MAIN ###############
+# Begin main: If you're running in library mode, none of this matters.
+
+if __name__ == "__main__":
+
+	import sys
+	from optparse import OptionParser
+
+	# process arguments
+	parser = OptionParser()
+	parser.add_option("-s", "--account-server", help="account server url if you are not using defaults", dest="account_server")
+	parser.add_option("-t", "--token-server", help="sync token server url if you are not using defaults", dest="token_server")
+	parser.add_option("-u", "--user", help="username", dest="username")
+	parser.add_option("-p", "--password", help="password (sent securely to server)", dest="password")
+	parser.add_option("-k", "--sync-key", help="synckey used to encrypt/decrypt sync data", dest="synckey")
+	parser.add_option("-K", "--credentialfile", help="get username, password, and synckey from this credential file (as name=value lines)", dest="credentialfile")
+	parser.add_option("-a", "--authenticate", help="get weave sync v6 authentication token", action="store_true", dest="authenticate")    
+	parser.add_option("-v", "--verbose", help="print verbose logging", action="store_true", dest="verbose")
+	parser.add_option("-l", "--log-level", help="set log level (critical|error|warn|info|debug)", dest="loglevel")
+	parser.add_option("", "--test-mode", help="use test data", action="store_true", dest="testmode")
+
+
+	(options, args) = parser.parse_args()
+
+	if options.credentialfile:
+		if options.username:
+			print "The 'username' option must not be used when a credential file is provided."
+			sys.exit(1)
+		if options.password:
+			print "The 'password' option must not be used when a credential file is provided."
+			sys.exit(1)
+		if options.synckey:
+			print "The 'synckey' option must not be used when a credential file is provided."
+			sys.exit(1)
+		try:
+			credFile = open(options.credentialfile, "r")
+			for line in credFile:
+				if len(line) and line[0] != '#':
+					key, value = line.split('=', 1)
+					key = key.strip()
+					if key == 'username':
+						options.username = value.strip()
+					elif key == 'password':
+						options.password = value.strip()
+					elif key == 'synckey':
+						options.synckey = value.strip()
+		except Exception, e:
+			import traceback
+			traceback.print_exc(e)
+			print e
+			sys.exit(1)
+
+	if options.testmode:
+		TEST_MODE = True
+		
+	if options.authenticate:
+		if not ( options.username and options.password ):
+			print "username and password are required arguments. Use -h for help."
+			sys.exit(1)
+	else:
+		if not ( options.username and options.password and options.synckey ):
+			print "username, password and synckey are required arguments. Use -h for help."
+			sys.exit(1)
+
+	if options.loglevel:
+		logging.basicConfig(level = str.upper(options.loglevel))
+	elif options.verbose:
+		logging.basicConfig(level = logging.DEBUG)
+	else:
+		logging.basicConfig(level = logging.ERROR)
+
+	if options.account_server:
+		account_server = options.server
+	else:
+		account_server="https://api.accounts.firefox.com"
+
+	if options.token_server:
+		token_server = options.token_server
+	else:
+		token_server="https://token.services.mozilla.com"
+
+	if options.synckey:
+		synckey = options.synckey
+	else:
+		synckey = None
+					
+	weaveAccount = WeaveAccountFxAContext()
+	weaveAccount.init(account_server, token_server, options.username, options.password, synckey)
+
+    
+	# Now do what the user asked for
+
+	if options.authenticate:
+
+		print "Getting FxA sync auth token"
+		token = weaveAccount.get_auth_token()
+		print pprint.pformat(token)
+			
+	else:
+		print "No command provided: use -h for help"
 

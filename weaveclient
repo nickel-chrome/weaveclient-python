@@ -1,0 +1,8 @@
+#!/bin/bash
+
+PYTHON_BIN="${HOME}/dev/projects/securecontacts/python_virtualenv/bin/python"
+
+WEAVE_PATH="$(dirname $0)"
+
+#echo "${PYTHON_BIN} ${WEAVE_PATH}/weaveclient.py $@"
+${PYTHON_BIN} "${WEAVE_PATH}/weaveclient.py" "$@"
