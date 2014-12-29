@@ -111,7 +111,7 @@ TEST_KEY_DATA = {
 				  12990977046205516997686321""", True),
 }
 
-############ WEAVE SYNC V5 USER API ###############
+############ WEAVE SYNC USER API ###############
 
 def createUser(serverURL, userID, password, email, secret = None, captchaChallenge = None, captchaResponse = None):
 	"""Create a new user at the given server, with the given userID, password, and email.
@@ -310,8 +310,8 @@ def setUserProfile(serverURL, userID, profileField, profileValue):
 		raise WeaveException("Unable to communicate with Weave server: %s" % e)
 
 
-# Weave Sync V5 User API object interface
-class WeaveAccountV5Context(object):
+# Weave Sync Legacy User API interface
+class WeaveAccountLegacy(object):
 
 	server   = None
 	username = None
@@ -326,7 +326,7 @@ class WeaveAccountV5Context(object):
 		return getUserStorageNode(self.server, self.username, self.password)
 
 
-############ WEAVE SYNC V6 FXA API ###############
+############ WEAVE SYNC FXA API ###############
 
 def getSyncAuthToken(session, server, synckey, audience=None, keypair=None, certificate=None):
 	# build browserid assertion then then request sync auth token from token server
@@ -458,9 +458,8 @@ def verify_assertion(audience, assertion, local=True):
 
 
 def build_client_state_header(synckey):
-	key_bytes = binascii.unhexlify(synckey)
 	m = hashlib.sha256()
-	m.update(key_bytes)
+	m.update(synckey)
 	client_state = binascii.hexlify(m.digest()[:16])
 	return client_state
 
@@ -593,8 +592,8 @@ class JWTKey(object):
 		return self.jwt_key
 
 
-# Weave Sync V6 FxA API object interface
-class WeaveAccountV6Context(object):
+# Weave Sync FxA account interface
+class WeaveAccountFxA(object):
 	"""Encapsulates the cryptographic context for the OnePw account and token server."""
 
 	account_server = None
@@ -604,29 +603,45 @@ class WeaveAccountV6Context(object):
 	synckey        = None
 	client         = None
 	session        = None
+	session_keys   = False
 
-
-	def init(self, account_server, token_server, username, password, synckey=None):
+	def init(self, account_server, token_server, username, password):
 		logging.debug("init()")
 		
 		self.account_server = account_server
 		self.token_server   = token_server
 		self.username       = username
 		self.password       = password
-		self.synckey        = synckey
+		self.client         = Client(account_server)
+
+	def get_session(self, keys=False):
+
+		if (self.session == None or (keys and not session_keys)):
+			if (self.session != None):
+				session.destroy_session()
+			
+			self.session = self.client.login(self.username, self.password, keys=keys)
+			self.session_keys = keys
+			
+		return self.session
+
 		
-		self.client       = Client(account_server)
-		self.session      = self.client.login(self.username, self.password, keys=(self.synckey == None))
+	def get_auth_token(self, audience=None, keypair=None, certificate=None, synckey=None):
+		if synckey == None:
+			synckey = self.get_synckey()
 
-		if self.synckey == None:
-			self.synckey = binascii.hexlify(self.session.fetch_keys()[1])
-
-		logging.debug("synckey: %s" % self.synckey)
-
+		#get_session() must come after get_synckey() to make sure we have the same session object
+		session = self.get_session()
 		
-	def get_auth_token(self, audience=None, keypair=None, certificate=None):		
-		return getSyncAuthToken(self.session, self.token_server, self.synckey, audience=audience, keypair=keypair, certificate=certificate)
-	
+		return getSyncAuthToken(session, self.token_server, synckey, audience=audience, keypair=keypair, certificate=certificate)
+
+
+	def get_synckey(self):
+		if self.synckey == None:			
+			self.synckey = self.get_session(True).fetch_keys()[1]
+
+		return self.synckey
+
 
 ############ MAIN ###############
 # Begin main: If you're running in library mode, none of this matters.
@@ -642,8 +657,7 @@ if __name__ == "__main__":
 	parser.add_option("-t", "--token-server", help="sync token server url if you are not using defaults", dest="token_server")
 	parser.add_option("-u", "--user", help="username", dest="username")
 	parser.add_option("-p", "--password", help="password (sent securely to server)", dest="password")
-	parser.add_option("-k", "--sync-key", help="synckey used to encrypt/decrypt sync data", dest="synckey")
-	parser.add_option("-K", "--credentialfile", help="get username, password, and synckey from this credential file (as name=value lines)", dest="credentialfile")
+	parser.add_option("-K", "--credentialfile", help="get username and password from this credential file (as name=value lines)", dest="credentialfile")
 	parser.add_option("-a", "--authenticate", help="get weave sync v6 authentication token", action="store_true", dest="authenticate")    
 	parser.add_option("-v", "--verbose", help="print verbose logging", action="store_true", dest="verbose")
 	parser.add_option("-l", "--log-level", help="set log level (critical|error|warn|info|debug)", dest="loglevel")
@@ -659,9 +673,6 @@ if __name__ == "__main__":
 		if options.password:
 			print "The 'password' option must not be used when a credential file is provided."
 			sys.exit(1)
-		if options.synckey:
-			print "The 'synckey' option must not be used when a credential file is provided."
-			sys.exit(1)
 		try:
 			credFile = open(options.credentialfile, "r")
 			for line in credFile:
@@ -672,8 +683,6 @@ if __name__ == "__main__":
 						options.username = value.strip()
 					elif key == 'password':
 						options.password = value.strip()
-					elif key == 'synckey':
-						options.synckey = value.strip()
 		except Exception, e:
 			import traceback
 			traceback.print_exc(e)
@@ -688,8 +697,8 @@ if __name__ == "__main__":
 			print "username and password are required arguments. Use -h for help."
 			sys.exit(1)
 	else:
-		if not ( options.username and options.password and options.synckey ):
-			print "username, password and synckey are required arguments. Use -h for help."
+		if not ( options.username and options.password ):
+			print "username and password are required arguments. Use -h for help."
 			sys.exit(1)
 
 	if options.loglevel:
@@ -709,13 +718,8 @@ if __name__ == "__main__":
 	else:
 		token_server="https://token.services.mozilla.com"
 
-	if options.synckey:
-		synckey = options.synckey
-	else:
-		synckey = None
-					
-	weaveAccount = WeaveAccountFxAContext()
-	weaveAccount.init(account_server, token_server, options.username, options.password, synckey)
+	weaveAccount = WeaveAccountFxA()
+	weaveAccount.init(account_server, token_server, options.username, options.password)
 
     
 	# Now do what the user asked for

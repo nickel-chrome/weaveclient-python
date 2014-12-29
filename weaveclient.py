@@ -61,9 +61,14 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
 
 from weaveinclude import WeaveException
-from weaveaccount import WeaveAccountV5Context, WeaveAccountV6Context, TEST_MODE as WA_TEST_MODE
+from weaveaccount import WeaveAccountLegacy, WeaveAccountFxA, TEST_MODE as WA_TEST_MODE
 
-class WeaveAuthBasicContext(object):
+
+########################################
+# Weave Sync HTTP auth implementation
+########################################
+
+class WeaveAuthBasic(object):
 
 	def __init__(self, username, password):
 		self.header_key = "Authorization"
@@ -73,7 +78,7 @@ class WeaveAuthBasicContext(object):
 		return self.header_key, self.header_val
 
 
-class WeaveAuthHawkContext(object):
+class WeaveAuthHawk(object):
 	
 	def __init__(self, id, key):
 		self.header_key = "Authorization"
@@ -136,120 +141,107 @@ class WeaveAuthHawkContext(object):
 
 		return True
 
+########################################
+# Weave Sync storage API implementation
+########################################
 
 class WeaveStorageContext(object):
-	"""An object that encapsulates a server, userID, and password, to simplify
+	"""An object that encapsulates a server and credentials, to simplify
 	storage calls for the client."""
 
-	storage_version = None
 	api_version     = None
 	
 	storageUrl      = None
 	storageAuth     = None
-	userID          = None
 
 	def http_get(self, url):
-		return storage_http_op("GET", self.userID, self.storageAuth, url)
+		return storage_http_op("GET", url, withAuth=self.storageAuth)
 
 	def put(self, collection, item, urlID=None, ifUnmodifiedSince=None):
-		return add_or_modify_item(self.storageUrl, self.userID, self.storageAuth, collection, item, urlID=urlID, ifUnmodifiedSince=ifUnmodifiedSince)
+		return add_or_modify_item(self.storageUrl, self.storageAuth, collection, item, urlID=urlID, ifUnmodifiedSince=ifUnmodifiedSince)
 
 	def put_collection(self, collection, itemArray, ifUnmodifiedSince=None):
-		return add_or_modify_items(self.storageUrl, self.userID, self.storageAuth, collection, itemArray, ifUnmodifiedSince=ifUnmodifiedSince)
+		return add_or_modify_items(self.storageUrl, self.storageAuth, collection, itemArray, ifUnmodifiedSince=ifUnmodifiedSince)
 
 	def delete(self, collection, id, ifUnmodifiedSince=None):
-		return delete_item(self.storageUrl, self.userID, self.storageAuth, collection, id, ifUnmodifiedSince=ifUnmodifiedSince)
+		return delete_item(self.storageUrl, self.storageAuth, collection, id, ifUnmodifiedSince=ifUnmodifiedSince)
 
 	def delete_collection(self, collection, idArray=None, params=None):
-		return delete_items(self.storageUrl, self.userID, self.storageAuth, collection, idArray=idArray, params=params)
+		return delete_items(self.storageUrl, self.storageAuth, collection, idArray=idArray, params=params)
 
 	def delete_items_older_than(self, collection, timestamp):
-		return delete_items_older_than(self.storageUrl, self.userID, self.storageAuth, collection, timestamp)
+		return delete_items_older_than(self.storageUrl, self.storageAuth, collection, timestamp)
 
 	def delete_all(self):
-		return delete_all(self.storageUrl, self.userID, self.storageAuth)
+		return delete_all(self.storageUrl, self.storageAuth)
 
 	def get_collection_counts(self):
-		return get_collection_counts(self.storageUrl, self.userID, self.storageAuth)
+		return get_collection_counts(self.storageUrl, self.storageAuth)
 
 	def get_collection_timestamps(self):
-		return get_collection_timestamps(self.storageUrl, self.userID, self.storageAuth)
+		return get_collection_timestamps(self.storageUrl, self.storageAuth)
 
 	def get_collection_ids(self, collection, params=None, asJSON=True, outputFormat=None):
-		return get_collection_ids(self.storageUrl, self.userID, self.storageAuth, collection, params=params, asJSON=asJSON, outputFormat=outputFormat)
+		return get_collection_ids(self.storageUrl, self.storageAuth, collection, params=params, asJSON=asJSON, outputFormat=outputFormat)
 
 	def get(self, collection, id, asJSON=True):
-		return get_item(self.storageUrl, self.userID, self.storageAuth, collection, id, asJSON=asJSON)
+		return get_item(self.storageUrl, self.storageAuth, collection, id, asJSON=asJSON)
 
 	def get_collection(self, collection, asJSON=True):
-		return get_items(self.storageUrl, self.userID, self.storageAuth, collection, asJSON=asJSON)
+		return get_items(self.storageUrl, self.storageAuth, collection, asJSON=asJSON)
 
 	def get_quota(self):
-		return get_quota(self.storageUrl, self.userID, self.storageAuth)
+		return get_quota(self.storageUrl, self.storageAuth)
 
 	def get_meta(self):
 		"""Returns an array of meta information. Storage version 5 only"""
-		item = get_path(self.storageUrl, self.userID, self.storageAuth, 'meta/global')
+		item = get_path(self.storageUrl, self.storageAuth, 'meta/global')
 		return json.loads(item['payload'])
 
 	def get_keys(self):
 		"""Returns storage keys. Storage version 5 only"""
-		item = get_path(self.storageUrl, self.userID, self.storageAuth, 'crypto/keys')
+		item = get_path(self.storageUrl, self.storageAuth, 'crypto/keys')
 		return json.loads(item['payload'])
 
 
-class WeaveStorageV5Context(WeaveStorageContext):
-	"""An object that encapsulates a server, userID, and password, to simplify
+class WeaveStorageV1_1(WeaveStorageContext):
+	"""An object that encapsulates a server and credentials, to simplify
 	storage calls for the client."""
 
-	storage_version = 5
-	api_version     = "1.1"
+	api_version = "1.1"
 
-	def __init__(self, server, username, password):
-		
-		account = WeaveAccountV5Context()
-		account.init(server, username, password)
+	def __init__(self, account, username, password):
 
-		self.storageUrl  = account.get_storage_url() + "/%s/%s" % (self.storage_version, username)
-		self.storageAuth = WeaveAuthBasicContext(username, password)
-		self.userID      = username
+		# Build storage url
+		self.storageUrl  = account.get_storage_url() + "/%s/%s" % (self.api_version, username)
 
-		# Check storage version
-		meta = self.get_meta()
-		if not int(meta['storageVersion']) == self.storage_version:
-			raise WeaveException("Storage version %s not supported" % meta['storageVersion'])
+		# Instansiate HTTP auth
+		self.storageAuth = WeaveAuthBasic(username, password)
 
 
-class WeaveStorageV6Context(WeaveStorageContext):
-	"""An object that encapsulates a server, userID, and password, to simplify
+class WeaveStorageV1_5(WeaveStorageContext):
+	"""An object that encapsulates a server and credentials, to simplify
 	storage calls for the client."""
 
-	#storage_version = 6
-	storage_version = 5
-	api_version     = "1.5"
+	api_version = "1.5"
 	
-	def __init__(self, accountServer, tokenServer, username, password):
-		logging.debug("WeaveStorageV6Context()")
+	def __init__(self, account):
+		logging.debug("WeaveStorageV1_5()")
 		
-		self.account = WeaveAccountV6Context()
-		self.account.init(accountServer, tokenServer, username, password)
-		token = self.account.get_auth_token()
+		token = account.get_auth_token()
 
 		logging.debug("auth token\n:" + pprint.pformat(token))
-		
+
+		# Build storage url
 		self.storageUrl  = token['api_endpoint']
 
+		# Instansiate HTTP auth
+		
 		#IMPORTANT - ignore urlsafe base64 encoding of id and key. use id as-is and encode key as utf8
 		hawk_id  = token['id']
 		hawk_key = token['key'].encode('utf8')
 
-		self.storageAuth = WeaveAuthHawkContext(hawk_id, hawk_key)
-		self.userID      = username
-
-		# Check storage version
-		meta = self.get_meta()
-		if not int(meta['storageVersion']) == self.storage_version:
-			raise WeaveException("Storage version %s not supported" % meta['storageVersion'])
+		self.storageAuth = WeaveAuthHawk(hawk_id, hawk_key)
 
 
 def storage_http_op(method, url, payload=None, asJSON=True, ifUnmodifiedSince=None, withConfirmation=None, withAuth=None, outputFormat=None):
@@ -303,7 +295,7 @@ def storage_http_op(method, url, payload=None, asJSON=True, ifUnmodifiedSince=No
 		return res.text
 
 
-def add_or_modify_item(storageServerURL, userID, auth, collection, item, urlID=None, ifUnmodifiedSince=None):
+def add_or_modify_item(storageServerURL, auth, collection, item, urlID=None, ifUnmodifiedSince=None):
 	'''Adds the WBO defined in 'item' to 'collection'.	If the WBO does
 	not contain a payload, will update the provided metadata fields on an
 	already-defined object.
@@ -325,7 +317,7 @@ def add_or_modify_item(storageServerURL, userID, auth, collection, item, urlID=N
 	
 	return storage_http_op("PUT", url, itemJSON, asJSON=False, ifUnmodifiedSince=ifUnmodifiedSince, withAuth=auth)
 
-def add_or_modify_items(storageServerURL, userID, auth, collection, itemArray, ifUnmodifiedSince=None):
+def add_or_modify_items(storageServerURL, auth, collection, itemArray, ifUnmodifiedSince=None):
 	'''Adds all the items defined in 'itemArray' to 'collection'; effectively
 	performs an add_or_modifiy_item for each.
 
@@ -352,13 +344,13 @@ def add_or_modify_items(storageServerURL, userID, auth, collection, itemArray, i
 	return storage_http_op("POST", url, itemArrayJSON, ifUnmodifiedSince=ifUnmodifiedSince, withAuth=auth)
 
 
-def delete_item(storageServerURL, userID, auth, collection, id, ifUnmodifiedSince=None):
+def delete_item(storageServerURL, auth, collection, id, ifUnmodifiedSince=None):
 	"""Deletes the item identified by collection and id."""
 
 	url = storageServerURL + "/storage/%s/%s" % (collection, urllib.quote(id))
 	return storage_http_op("DELETE", url, ifUnmodifiedSince=ifUnmodifiedSince, withAuth=auth)
 
-def delete_items(storageServerURL, userID, auth, collection, idArray=None, params=None):
+def delete_items(storageServerURL, auth, collection, idArray=None, params=None):
 	"""Deletes the item identified by collection, idArray, and optional parameters."""
 
 	# TODO: Replace params with named arguments.
@@ -376,32 +368,32 @@ def delete_items(storageServerURL, userID, auth, collection, idArray=None, param
 			
 	return storage_http_op("DELETE", url, withAuth=auth)
 
-def delete_items_older_than(storageServerURL, userID, auth, collection, timestamp):
+def delete_items_older_than(storageServerURL, auth, collection, timestamp):
 	"""Deletes all items in the given collection older than the provided timestamp."""
 
 	url = storageServerURL + "/storage/%s?older=%s" % (collection, timestamp)
 	return storage_http_op("DELETE", url, withAuth=auth)
 
-def delete_all(storageServerURL, userID, auth, confirm=True):
+def delete_all(storageServerURL, auth, confirm=True):
 	"""Deletes all items in the given collection."""
 
 	# The only reason you'd want confirm=False is for unit testing
 	url = storageServerURL + "/storage"
 	return storage_http_op("DELETE", url, asJSON=False, withConfirmation=confirm, withAuth=auth)
 
-def get_collection_counts(storageServerURL, userID, auth):
+def get_collection_counts(storageServerURL, auth):
 	"""Returns a map of all collection names and the number of objects in each."""
 
 	url = storageServerURL + "/info/collection_counts"
 	return storage_http_op("GET", url, withAuth=auth)
 
-def get_collection_timestamps(storageServerURL, userID, auth):
+def get_collection_timestamps(storageServerURL, auth):
 	"""Returns a map of the modified timestamp for each of the collections."""
 
 	url = storageServerURL + "/info/collections"
 	return storage_http_op("GET", url, withAuth=auth)
 
-def get_collection_ids(storageServerURL, userID, auth, collection, params=None, asJSON=True, outputFormat=None):
+def get_collection_ids(storageServerURL, auth, collection, params=None, asJSON=True, outputFormat=None):
 	"""Returns a list of IDs for objects in the specified collection."""
 
 	# TODO replace params with named arguments
@@ -411,7 +403,7 @@ def get_collection_ids(storageServerURL, userID, auth, collection, params=None, 
 		url = storageServerURL + "/storage/%s" % (collection)
 	return storage_http_op("GET", url, asJSON=asJSON, outputFormat=outputFormat, withAuth=auth)
 
-def get_items(storageServerURL, userID, auth, collection, asJSON=True):
+def get_items(storageServerURL, auth, collection, asJSON=True):
 	"""Returns all the items in the given collection."""
 	logging.debug("get_items()")
 
@@ -419,40 +411,48 @@ def get_items(storageServerURL, userID, auth, collection, asJSON=True):
 	url = storageServerURL + "/storage/%s?full=1" % (collection)
 	return storage_http_op("GET", url, asJSON=asJSON, withAuth=auth)
 
-def get_item(storageServerURL, userID, auth, collection, id, asJSON=True):
+def get_item(storageServerURL, auth, collection, id, asJSON=True):
 	"""Returns the specified item."""
 
 	# The only reason to set withFalse=False is for unit testing
 	url = storageServerURL + "/storage/%s/%s?full=1" % (collection, id)
 	return storage_http_op("GET", url, asJSON=asJSON, withAuth=auth)
 
-def get_quota(storageServerURL, userID, auth):
+def get_quota(storageServerURL, auth):
 	"Returns an array of [<amount used>,<limit>].  Not implemented by Weave 1.0 production servers."
 
 	url = storageServerURL + "/info/quota"
 	return storage_http_op("GET", url, withAuth=auth)
 
-def get_path(storageServerURL, userID, auth, path):
+def get_path(storageServerURL, auth, path):
 	"Returns JSON object at given path"
 
 	url = storageServerURL + "/storage/%s" % (path)
 	return storage_http_op("GET", url, withAuth=auth)
 
 
-# Crypto implementation:
-from PBKDF2 import PBKDF2
-from M2Crypto.EVP import Cipher, RSA, load_key_string
-import M2Crypto.m2
+############################################
+# Weave Sync storage crypto implementation
+############################################
+
+from M2Crypto.EVP import Cipher
 
 M2Crypto_Decrypt = 0
 M2Crypto_Encrypt = 1
 
+class WeaveKeypair(object):
+	crypt_key = None
+	hmac_key  = None
 
-class WeaveClient(object):
+	def __init__(self, crypt_key, hmac_key):
+		self.crypt_key = crypt_key
+		self.hmac_key  = hmac_key
+
+
+class WeaveCryptoContext(object):
 	"""Encapsulates the cryptographic context for a user and their collections."""
 
 	ctx          = None
-	passphrase   = None
 	privateKey   = None
 	privateHmac  = None
 	bulkKeys     = None
@@ -460,195 +460,61 @@ class WeaveClient(object):
 	bulkKeyHmacs = None
 
 
-	def fetchPrivateKey(self):
-		"""Fetch the private key for the user and storage context
-		provided to this object, and decrypt the private key
-		by using my passphrase.	 Store the private key in internal
-		storage for later use."""
-		logging.debug("fetchPrivateKey()")
+	@staticmethod
+	def get_instance(params):
+		logging.debug("WeaveCrypto.getInstance()")
 
-		if self.ctx.storage_version == 5:
-
-			# Generate key pair using SHA-256 HMAC-based HKDF of sync key
-			# See https://docs.services.mozilla.com/sync/storageformat5.html#the-sync-key
- 
-			# Remove dash chars, convert to uppercase and translate 8 and 9 to L and O
-			syncKeyB32 = string.translate(str.upper(self.passphrase), string.maketrans('89', 'LO'), '-')
-
-			#logging.debug("normalised sync key: %s" % syncKeyB32)
-	
-			# Pad base32 string to multiple of 8 chars (40 bits)
-			if (len(syncKeyB32) % 8) > 0:
-				paddedLength = len(syncKeyB32) + 8 - (len(syncKeyB32) % 8)
-				syncKeyB32 = syncKeyB32.ljust(paddedLength, '=')
-
-			syncKey = base64.b32decode(syncKeyB32)
-			
-			keyInfo = 'Sync-AES_256_CBC-HMAC256' + self.ctx.userID
-
-			# For testing only
-			#syncKey = binascii.unhexlify("c71aa7cbd8b82a8ff6eda55c39479fd2")
-			#keyInfo = 'Sync-AES_256_CBC-HMAC256' + "johndoe@example.com"
-
-			#logging.debug("base32 key: %s decoded to %s" % (self.passphrase, binascii.hexlify(syncKey)))
-
-			self.privateKey	 = hmac.new(syncKey, msg=keyInfo + chr(0x01), digestmod=hashlib.sha256).digest()
-			self.privateHmac = hmac.new(syncKey, msg=self.privateKey + keyInfo + chr(0x02), digestmod=hashlib.sha256).digest()
-
-			logging.info("Successfully generated sync key and hmac key")
-			logging.debug("sync key: %s, crypt key: %s, crypt hmac: %s" % (binascii.hexlify(syncKey), binascii.hexlify(self.privateKey), binascii.hexlify(self.privateHmac)))
-
-			
-		elif self.ctx.storage_version == 3:
-
-			# Retrieve encrypted private key from the server
-			logging.info("Fetching encrypted private key from server")
-			privKeyObj = self.ctx.get_item("keys", "privkey")
-			payload = json.loads(privKeyObj['payload'])
-			self.privKeySalt = base64.decodestring(payload['salt'])
-			self.privKeyIV = base64.decodestring(payload['iv'])
-			self.pubKeyURI = payload['publicKeyUri']
-			
-			data64 = payload['keyData']
-			encryptedKey = base64.decodestring(data64)
-			
-			# Now decrypt it by generating a key with the passphrase
-			# and performing an AES-256-CBC decrypt.
-			logging.info("Decrypting encrypted private key")
-
-			passKey = PBKDF2(self.passphrase, self.privKeySalt, iterations=4096).read(32)
-			cipher = Cipher(alg='aes_256_cbc', key=passKey, iv=self.privKeyIV, op=M2Crypto_Decrypt)
-			cipher.set_padding(padding=1)
-			v = cipher.update(encryptedKey)
-			v = v + cipher.final()
-			del cipher
-			decryptedKey = v
-
-
-			# Result is an NSS-wrapped key.
-			# We have to do some manual ASN.1 parsing here, which is unfortunate.
-			
-			# 1. Make sure offset 22 is an OCTET tag; if this is not right, the decrypt
-			# has gone off the rails.
-			if ord(decryptedKey[22]) != 4:
-				logging.debug("Binary layout of decrypted private key is incorrect; probably the passphrase was incorrect.")
-				raise ValueError("Unable to decrypt key: wrong passphrase?")
-
-			# 2. Get the length of the raw key, by interpreting the length bytes
-			offset = 23
-			rawKeyLength = ord(decryptedKey[offset])
-			det = rawKeyLength & 0x80
-			if det == 0: # 1-byte length
-				offset += 1
-				rawKeyLength = rawKeyLength & 0x7f
-			else: # multi-byte length
-				bytes = rawKeyLength & 0x7f
-				offset += 1
-
-				rawKeyLength = 0
-				while bytes > 0:
-					rawKeyLength *= 256
-					rawKeyLength += ord(decryptedKey[offset])
-					offset += 1
-					bytes -= 1
-
-			# 3. Sanity check
-			if offset + rawKeyLength > len(decryptedKey):
-				rawKeyLength = len(decryptedKey) - offset
-
-			# 4. Extract actual key
-			privateKey = decryptedKey[offset:offset+rawKeyLength]
-
-			# And we're done.
-			self.privateKey = privateKey
-			logging.debug("Successfully decrypted private key")
-
+		storage_version = None
+		if 'storage_version' in params:
+			storage_version = params['storage_version']
 		else:
-			raise WeaveException("Storage version %s not supported" % self.ctx.storage_version)
+			storage_version = "V5"
+
+		#dynamically instansiate WeaveCryptoContext
+		wc_name  = "WeaveCrypto" + storage_version
+		wc_class = getattr(sys.modules[__name__], wc_name)
+
+		#instansiate and initialise class
+		wc = wc_class()
+		wc.init_from_params(params)
+		
+		return wc
 
 
+	def fetchPrivateKey(self):
+		pass
+
+	
 	def fetchBulkKey(self, label):
 		"""Given a bulk key label, pull the key down from the network,
 		and decrypt it using my private key.  Then store the key
 		into self storage for later decrypt operations."""
+		
 		logging.debug("fetchBulkKey()")
 
 		# Do we have the key already?
 		if label in self.bulkKeys:
 			return
 
-		if self.ctx.storage_version == 5:
+		logging.info("Fetching encrypted bulk key for %s" % label)
 
-			logging.info("Fetching encrypted bulk key for %s" % label)
+		itemPayload = self.ctx.get_keys()
 
-			itemPayload = self.ctx.get_keys()
+		# Recursively call decrypt to extract key for label
+		keyData = json.loads(self.decrypt(itemPayload))
 
-			# Recursively call decrypt to extract key for label
-			keyData = json.loads(self.decrypt(itemPayload))
-			
-			keyLabel = label
-			if label not in keyData:
-				keyLabel = 'default'
-			
-			if keyLabel not in keyData:
-				raise WeaveException("No key found for label %s" % label)
+		keyLabel = label
+		if label not in keyData:
+			keyLabel = 'default'
 
-			self.bulkKeys[label] = base64.decodestring(keyData[keyLabel][0])
-			self.bulkKeyHmacs[label] = base64.decodestring(keyData[keyLabel][1])			
+		if keyLabel not in keyData:
+			raise WeaveException("No key found for label %s" % label)
 
-			logging.debug("Successfully decrypted bulk key for %s" % label)
+		self.bulkKeys[label] = base64.decodestring(keyData[keyLabel][0])
+		self.bulkKeyHmacs[label] = base64.decodestring(keyData[keyLabel][1])			
 
-		elif self.ctx.storage_version == 3:
+		logging.debug("Successfully decrypted bulk key for %s" % label)
 
-			logging.info("Fetching encrypted bulk key from %s" % label)
-
-			# Note that we do not currently support any authentication model for bulk key
-			# retrieval other than the usual weave username-password pair.	To support
-			# distributed key models for the more advanced sharing scenarios, we will need
-			# to revisit that.
-			keyData = self.ctx.http_get(label)
-			keyPayload = json.loads(keyData['payload'])
-			bulkIV = base64.decodestring(keyPayload['bulkIV'])
-
-			keyRing = keyPayload['keyring']
-
-			# In a future world where we have sharing, the keys of the keyring dictionary will
-			# define public key domains for the symmetric bulk keys stored on the ring.
-			# Right now, the first item is always the pubkey of a user, and we just grab the first value.
-
-			# We should really make sure that the key we have here matches the private key
-			# we're using to unwrap, or none of this makes sense.
-
-			# Now, using the user's private key, we will unwrap the symmetric key.
-			encryptedBulkKey = base64.decodestring(keyRing.items()[0][1])
-
-			# This is analogous to this openssl command-line invocation:
-			# openssl rsautl -decrypt -keyform DER -inkey privkey.der -in wrapped_symkey.dat -out unwrapped_symkey.dat
-			#
-			# ... except that M2Crypto doesn't have an API for DER importing,
-			# so we have to PEM-encode the key (with base64 and header/footer blocks).
-			# So what we're actually doing is:
-			#
-			# openssl rsautl -decrypt -keyform PEM -inkey privkey.pem -in wrapped_symkey.dat -out unwrapped_symkey.dat
-
-			logging.debug("Decrypting encrypted bulk key %s" % label)
-
-			pemEncoded = "-----BEGIN RSA PRIVATE KEY-----\n"
-			pemEncoded += base64.encodestring(self.privateKey)
-			pemEncoded += "-----END RSA PRIVATE KEY-----\n"
-
-			# Create an EVP, extract the RSA key from it, and do the decrypt
-			evp = load_key_string(pemEncoded)
-			rsa = M2Crypto.m2.pkey_get1_rsa(evp.pkey)
-			rsaObj = RSA.RSA(rsa)
-			unwrappedSymKey = rsaObj.private_decrypt(encryptedBulkKey, RSA.pkcs1_padding)
-
-			# And save it for later use
-			self.bulkKeys[label] = unwrappedSymKey
-			self.bulkKeyIVs[label] = bulkIV
-			logging.debug("Successfully decrypted bulk key from %s" % label)
-
-		return
 
 	def decrypt_weave_basic_object(self, wbo, encryptionLabel=None):
 		
@@ -660,6 +526,7 @@ class WeaveClient(object):
 		wboDecrypt['payload'] = cleartext;
 
 		return wboDecrypt
+
 	
 	def decrypt(self, encryptedObject, encryptionLabel=None):
 		"""Given an encrypted object, decrypt it and return the plaintext value.
@@ -674,82 +541,53 @@ class WeaveClient(object):
 
 		v = None
 		
-		if self.ctx.storage_version == 5:
-
-			# An encrypted object has three relevant fields
-			ciphertext	= base64.decodestring(encryptedObject['ciphertext'])
-			iv			= base64.decodestring(encryptedObject['IV'])
-			cipher_hmac = encryptedObject['hmac'].encode('ascii')
-
-			crypt_key	= None
-			crypt_hmac	= None
+		# An encrypted object has three relevant fields
+		ciphertext	= base64.decodestring(encryptedObject['ciphertext'])
+		iv			= base64.decodestring(encryptedObject['IV'])
+		cipher_hmac = encryptedObject['hmac'].encode('ascii')
+		
+		crypt_key	= None
+		crypt_hmac	= None
 			
-			if encryptionLabel == None:
-				logging.debug("Decrypting data record using sync key")
-
-				# Go get the keying infromation if need it
-				if self.privateKey == None:
-					self.fetchPrivateKey()
-
-				crypt_key  = self.privateKey
-				crypt_hmac = self.privateHmac
-
-			else:
-				logging.debug("Decrypting data record using bulk key %s" % encryptionLabel)
-
-				# Go get the keying infromation if need it
-				if encryptionLabel not in self.bulkKeys:
-					self.fetchBulkKey(encryptionLabel)
-
-				crypt_key  = self.bulkKeys[encryptionLabel]
-				crypt_hmac = self.bulkKeyHmacs[encryptionLabel]
-
-			#logging.debug("payload: %s, crypt key:	 %s, crypt hmac: %s" % (encryptedObject, binascii.hexlify(crypt_key), binascii.hexlify(crypt_hmac)))
-			
-			# HMAC verification is done against base64 encoded ciphertext
-			local_hmac = hmac.new(crypt_hmac, msg=encryptedObject['ciphertext'], digestmod=hashlib.sha256).digest()
-			local_hmac = binascii.hexlify(local_hmac)
-			
-			if local_hmac != cipher_hmac:
-				raise WeaveException("HMAC verification failed!")
-				
-			# In case you were wondering, this is the same as this operation at the openssl command line:
-			# openssl enc -d -in data -aes-256-cbc -K `cat unwrapped_symkey.16` -iv `cat iv.16`
-
-			# Do the decrypt
-			cipher = Cipher(alg='aes_256_cbc', key=crypt_key, iv=iv, op=M2Crypto_Decrypt)
-			v = cipher.update(ciphertext)
-			v = v + cipher.final()
-			del cipher
-			logging.debug("Successfully decrypted v5 data record")
-			
-		elif self.ctx.storage_version == 3:
-			
-			# An encrypted object has two relevant fields
-			encryptionLabel = encryptedObject['encryption']
-			ciphertext = base64.decodestring(encryptedObject['ciphertext'])
+		if encryptionLabel == None:
+			logging.debug("Decrypting data record using sync key")
 
 			# Go get the keying infromation if need it
 			if self.privateKey == None:
 				self.fetchPrivateKey()
-			if not encryptionLabel in self.bulkKeys:
-				self.fetchBulkKey(encryptionLabel)
 
-			# In case you were wondering, this is the same as this operation at the openssl command line:
-			# openssl enc -d -in data -aes-256-cbc -K `cat unwrapped_symkey.16` -iv `cat iv.16`
-
-			# Do the decrypt
-			logging.debug("Decrypting data record using bulk key %s" % encryptionLabel)
-			cipher = Cipher(alg='aes_256_cbc', key=self.bulkKeys[encryptionLabel], iv=self.bulkKeyIVs[encryptionLabel], op=M2Crypto_Decrypt)
-			v = cipher.update(ciphertext)
-			v = v + cipher.final()
-			del cipher
-			logging.debug("Successfully decrypted v3 data record")
+			crypt_key  = self.privateKey
+			crypt_hmac = self.privateHmac
 
 		else:
-			raise WeaveException("Storage version %s not supported" % self.ctx.storage_version)
+			logging.debug("Decrypting data record using bulk key %s" % encryptionLabel)
 
-		
+			# Go get the keying infromation if need it
+			if encryptionLabel not in self.bulkKeys:
+				self.fetchBulkKey(encryptionLabel)
+
+			crypt_key  = self.bulkKeys[encryptionLabel]
+			crypt_hmac = self.bulkKeyHmacs[encryptionLabel]
+
+		#logging.debug("payload: %s, crypt key:	 %s, crypt hmac: %s" % (encryptedObject, binascii.hexlify(crypt_key), binascii.hexlify(crypt_hmac)))
+			
+		# HMAC verification is done against base64 encoded ciphertext
+		local_hmac = hmac.new(crypt_hmac, msg=encryptedObject['ciphertext'], digestmod=hashlib.sha256).digest()
+		local_hmac = binascii.hexlify(local_hmac)
+			
+		if local_hmac != cipher_hmac:
+			raise WeaveException("HMAC verification failed!")
+				
+		# In case you were wondering, this is the same as this operation at the openssl command line:
+		# openssl enc -d -in data -aes-256-cbc -K `cat unwrapped_symkey.16` -iv `cat iv.16`
+
+		# Do the decrypt
+		cipher = Cipher(alg='aes_256_cbc', key=crypt_key, iv=iv, op=M2Crypto_Decrypt)
+		v = cipher.update(ciphertext)
+		v = v + cipher.final()
+		del cipher
+		logging.debug("Successfully decrypted v5 data record")
+			
 		return v
 
 
@@ -759,76 +597,138 @@ class WeaveClient(object):
 		logging.debug("encrypt()")
 		logging.debug("plaintext:\n" + pprint.pformat(plaintextData))
 		
-		if self.ctx.storage_version == 5:
-
-			crypt_key	= None
-			hmac_key	= None
+		crypt_key	= None
+		hmac_key	= None
 			
-			if encryptionLabel == None:
-				logging.debug("Encrypting data record using sync key")
+		if encryptionLabel == None:
+			logging.debug("Encrypting data record using sync key")
 
-				# Go get the keying infromation if need it
-				if self.privateKey == None:
-					self.fetchPrivateKey()
-
-				crypt_key  = self.privateKey
-				hmac_key   = self.privateHmac
-
-			else:
-				logging.debug("Encrypting data record using bulk key %s" % encryptionLabel)
-
-				# Go get the keying infromation if need it
-				if encryptionLabel not in self.bulkKeys:
-					self.fetchBulkKey(encryptionLabel)
-
-				crypt_key  = self.bulkKeys[encryptionLabel]
-				hmac_key   = self.bulkKeyHmacs[encryptionLabel]
-
-
-			encryptedData = None
-
-			if isinstance(plaintextData, list):
+			# Go get the keying infromation if need it
+			if self.privateKey == None:
+				self.fetchPrivateKey()
 				
-				# Encrypt collection
-				encryptedData = []
-				for item in plaintextData:
-					# Note recursive call
-					encryptedData.append({u'id': unicode(item['id']), u'payload': json.dumps(self.encrypt(item['payload'], encryptionLabel), ensure_ascii=False)})
-
-			else:
-
-				# Encrypt item
-				if type(plaintextData) != str and (plaintextData) != unicode:
-					plaintextData = json.dumps(plaintextData, ensure_ascii=False)
-
-				#logging.debug("payload: %s, crypt key:	 %s, crypt hmac: %s" % (plaintextData, binascii.hexlify(crypt_key), binascii.hexlify(hmac_key)))
-
-				# Encrypt object
-				iv			  = os.urandom(16)
-				cipher		  = Cipher(alg='aes_256_cbc', key=crypt_key, iv=iv, op=M2Crypto_Encrypt)
-				encryptedData = cipher.update(plaintextData) + cipher.final()				 
-				del cipher
-				
-				#format for Weave storage, i.e. base64 unicode
-				ciphertext = unicode(base64.b64encode(encryptedData))
-				ivtext	   = unicode(base64.b64encode(iv))
-				hmactext   = unicode(binascii.hexlify(hmac.new(hmac_key, msg=ciphertext, digestmod=hashlib.sha256).digest()))
-
-				encryptedData = {u'ciphertext': ciphertext, u'IV': ivtext, u'hmac': hmactext}
-			
-			logging.debug("Successfully encrypted v5 data record")
-
-			return encryptedData
+			crypt_key  = self.privateKey
+			hmac_key   = self.privateHmac
 
 		else:
-			raise WeaveException("Encryption not supported for storage version %s" % self.ctx.storage_version)
+			logging.debug("Encrypting data record using bulk key %s" % encryptionLabel)
+
+			# Go get the keying infromation if need it
+			if encryptionLabel not in self.bulkKeys:
+				self.fetchBulkKey(encryptionLabel)
+				
+			crypt_key  = self.bulkKeys[encryptionLabel]
+			hmac_key   = self.bulkKeyHmacs[encryptionLabel]
+
+
+		encryptedData = None
+
+		if isinstance(plaintextData, list):
+				
+			# Encrypt collection
+			encryptedData = []
+			for item in plaintextData:
+				# Note recursive call
+				encryptedData.append({u'id': unicode(item['id']), u'payload': json.dumps(self.encrypt(item['payload'], encryptionLabel), ensure_ascii=False)})
+
+		else:
+
+			# Encrypt item
+			if type(plaintextData) != str and (plaintextData) != unicode:
+				plaintextData = json.dumps(plaintextData, ensure_ascii=False)
+				
+			#logging.debug("payload: %s, crypt key:	 %s, crypt hmac: %s" % (plaintextData, binascii.hexlify(crypt_key), binascii.hexlify(hmac_key)))
+
+			# Encrypt object
+			iv			  = os.urandom(16)
+			cipher		  = Cipher(alg='aes_256_cbc', key=crypt_key, iv=iv, op=M2Crypto_Encrypt)
+			encryptedData = cipher.update(plaintextData) + cipher.final()				 
+			del cipher
+				
+			#format for Weave storage, i.e. base64 unicode
+			ciphertext = unicode(base64.b64encode(encryptedData))
+			ivtext	   = unicode(base64.b64encode(iv))
+			hmactext   = unicode(binascii.hexlify(hmac.new(hmac_key, msg=ciphertext, digestmod=hashlib.sha256).digest()))
+
+			encryptedData = {u'ciphertext': ciphertext, u'IV': ivtext, u'hmac': hmactext}
+			
+		logging.debug("Successfully encrypted v5 data record")
+
+		return encryptedData
+
+
+class WeaveCryptoV5(WeaveCryptoContext):
+	"""Encapsulates the cryptographic context for a user and their collections."""
+
+	def init_from_params(self, params):
+		self.init(
+			params['storage_client'],
+			params['keypair']
+		)
+		
+	def init(self, storage_client, keypair):
+
+		self.ctx = storage_client
+		
+		self.privateKey   = keypair.crypt_key
+		self.privateHmac  = keypair.hmac_key
+		
+		self.bulkKeys     = {}
+		self.bulkKeyIVs   = {}
+		self.bulkKeyHmacs = {}
+
+
+class WeaveCryptoV6(WeaveCryptoContext):
+	"""Encapsulates the cryptographic context for a user and their collections."""
+
+	def __init__(self):
+		raise WeaveException("Not yet implemented")
+
+
+########################################
+# Weave Sync client implementation
+########################################
+
+class WeaveClient(object):
+	"""Abstracts access to Weave Sync storage. Supports multiple storage API/crypto combinations"""
+
+	ctx          = None
+	crypto       = None
+	
+	@staticmethod
+	def get_instance(params):
+		logging.debug("WeaveClient.getInstance()")
+
+		api_version = None
+		if 'api_version' in params:
+			api_version = params['api_version']
+		else:
+			api_version = "v1_1"
+
+		#dynamically instansiate WeaveClientContext
+		wc_name  = "WeaveClient" + api_version
+		wc_class = getattr(sys.modules[__name__], wc_name)
+
+		#instansiate and initialise class
+		wc = wc_class()
+		wc.init_from_params(params)
+		
+		return wc
+
+
+	def get_api_version(self):
+		return self.ctx.version
+
+
+	def get_storage_version(self):
+		return self.crypto.version
 
 
 	def get(self, collection, id, decrypt=True):
 		wbo = self.ctx.get(collection, id)
 
 		if ( decrypt ):
-			wbo = self.decrypt_weave_basic_object(wbo, collection)
+			wbo = self.crypto.decrypt_weave_basic_object(wbo, collection)
 
 		return wbo
 
@@ -840,10 +740,10 @@ class WeaveClient(object):
 	def get_collection(self, collection, decrypt=True):
 		colWbo = self.ctx.get_collection(collection)
 
-		colWboDecrypt = []
 		if ( decrypt ):
+			colWboDecrypt = []
 			for wbo in colWbo:
-				colWboDecrypt.append(self.decrypt_weave_basic_object(wbo, collection))
+				colWboDecrypt.append(self.crypto.decrypt_weave_basic_object(wbo, collection))
 			
 			colWbo = colWboDecrypt
 
@@ -851,52 +751,164 @@ class WeaveClient(object):
 
 
 	def put(self, collection, id, item, encrypt=True):
+
+		if encrypt:
+			item = self.crypo.encrypt(item, collection)
+		
 		return self.ctx.put(collection, id, item)
 
-	def put_collection(collection, itemArray):
+
+	def put_collection(collection, itemArray, encrypt=True):
+
+		if encrypt:
+			colWboEncrypt = []
+			for item in itemArray:
+				colWboEncrypt.append(self.crypto.encrypt(item, collection))
+
+			itemArray = colWboEncrypt
+		
 		return self.ctx.put_collection(collection, itemArray)
+
 
 	def delete(collection, id):
 		return self.ctx.delete(collection, id)
 
+
 	def delete_collection(self, collection, idArray=None, params=None):
 		return self.ctx.delete_collection(collection, idArray=idArray, params=params)
 
-				
-class WeaveClientV5(WeaveClient):
+
+class WeaveClientV1_1(WeaveClient):
 	"""Encapsulates the cryptographic context for a user and their collections."""
-
-	def __init__(self, rootServer, userID, password, passphrase):
-		self.ctx          = WeaveStorageV5Context(rootServer, userID, password)
-		self.passphrase   = passphrase
-		self.privateKey   = None
-		self.privateHmac  = None
-		self.bulkKeys     = {}
-		self.bulkKeyIVs   = {}
-		self.bulkKeyHmacs = {}
-
-
-class WeaveClientV6(WeaveClient):
-	"""Encapsulates the cryptographic context for a user and their collections."""
-
-	def __init__(self, account_server, token_server, username, password, synckey=None):
-		logging.debug("WeaveClientV6()")
+	
+	def init_from_params(self, params):
+		self.init(
+			params['account_server'],
+			params['username'],
+			params['password'],
+			params['synckey']
+		)
 		
-		self.ctx          = WeaveStorageV6Context(account_server, token_server, username, password)
-		self.passphrase   = synckey
-		self.privateKey   = None
-		self.privateHmac  = None
-		self.bulkKeys     = {}
-		self.bulkKeyIVs   = {}
-		self.bulkKeyHmacs = {}
+	def init(self, account_server, username, password, synckey):
 
-		if self.passphrase == None:
-			self.passphrase = self.ctx.account.synckey
+		# Instansiate account
+		account = WeaveAccountLegacy()
+		account.init(account_server, username, password)
 
-		logging.debug("synckey: %s" % self.passphrase)
-			
-	def fetchPrivateKey(self):
-		logging.debug("fetchPrivateKey()")
+		# Instansiate storage client
+		self.ctx = WeaveStorageV1_1(account, username, password)
+
+		# Get sync keypair
+		
+		# Remove dash chars, convert to uppercase and translate 8 and 9 to L and O
+		synckey_b32 = string.translate(str.upper(synckey), string.maketrans('89', 'LO'), '-')
+		
+		#logging.debug("normalised sync key: %s" % synckey_b32)
+		
+		# Pad base32 string to multiple of 8 chars (40 bits)
+		if (len(synckey_b32) % 8) > 0:
+			paddedLength = len(synckey_b32) + 8 - (len(synckey_b32) % 8)
+			synckey_b32 = synckey_b32.ljust(paddedLength, '=')
+
+		synckey_bin = base64.b32decode(synckey_b32)
+
+		sync_keypair = self.derive_sync_keypair(synckey_bin, username)
+
+		# Check storage version
+		meta = self.ctx.get_meta()
+		storage_version = "V" + str(meta['storageVersion'])
+
+		# Instansiate crypto client
+		params = {
+			'storage_version': storage_version,
+			'storage_client': self.ctx,
+			'keypair': sync_keypair,
+		}
+		
+		self.crypto = WeaveCryptoContext.get_instance(params)
+
+
+	def derive_sync_keypair(self, synckey, username):
+		"""Fetch the private key for the user and storage context
+		provided to this object, and decrypt the private key
+		by using my passphrase.	 Store the private key in internal
+		storage for later use."""
+		
+		logging.debug("derive_sync_keypair()")
+
+		# Generate key pair using SHA-256 HMAC-based HKDF of sync key
+		# See https://docs.services.mozilla.com/sync/storageformat5.html#the-sync-key
+					
+		keyInfo = 'Sync-AES_256_CBC-HMAC256' + username
+
+		# For testing only
+		#synckey = binascii.unhexlify("c71aa7cbd8b82a8ff6eda55c39479fd2")
+		#keyInfo = 'Sync-AES_256_CBC-HMAC256' + "johndoe@example.com"
+		
+		#logging.debug("base32 key: %s decoded to %s" % (self.synckey, binascii.hexlify(syncKey)))
+		
+		crypt_key = hmac.new(synckey, msg=keyInfo + chr(0x01), digestmod=hashlib.sha256).digest()
+		hmac_key  = hmac.new(synckey, msg=crypt_key + keyInfo + chr(0x02), digestmod=hashlib.sha256).digest()
+		
+		logging.info("Successfully generated sync key and hmac key")
+		logging.debug("sync key: %s, crypt key: %s, hmac key: %s" % (binascii.hexlify(synckey), binascii.hexlify(crypt_key), binascii.hexlify(hmac_key)))
+
+		return WeaveKeypair(crypt_key, hmac_key)
+
+
+class WeaveClientV1_5(WeaveClient):
+	"""Encapsulates the cryptographic context for a user and their collections."""
+	
+	def init_from_params(self, params):
+	
+		synckey = None
+		if 'synckey' in params:
+			synckey = params['synckey']
+		
+		self.init(
+			params['account_server'],
+			params['token_server'],			
+			params['username'],
+			params['password'],
+			synckey=synckey
+		)
+
+	def init(self, account_server, token_server, username, password, synckey=None):
+		logging.debug("WeaveClientV1_5.init()")
+
+		# Instansiate account
+		account = WeaveAccountFxA()
+		account.init(account_server, token_server, username, password)
+
+		# Instansiate storage client
+		self.ctx = WeaveStorageV1_5(account)
+		
+		# Get sync keypair
+		if not synckey == None:
+			synckey = binascii.unhexlify(synckey)
+		else:
+			synckey = account.get_synckey()
+		
+		logging.debug("synckey: %s" % binascii.hexlify(synckey))
+
+		sync_keypair = self.derive_sync_keypair(synckey)
+
+		# Check storage version
+		meta = self.ctx.get_meta()
+		storage_version = "V" + str(meta['storageVersion'])
+
+		# Instansiate crypto client
+		params = {
+			'storage_version': storage_version,
+			'storage_client': self.ctx,
+			'keypair': sync_keypair,
+		}
+		
+		self.crypto = WeaveCryptoContext.get_instance(params)
+
+
+	def derive_sync_keypair(self, synckey):
+		logging.debug("derive_sync_keypair()")
 
 		kdf = HKDF(
 			algorithm=hashes.SHA256(),
@@ -905,15 +917,17 @@ class WeaveClientV6(WeaveClient):
 			info=b"identity.mozilla.com/picl/v1/oldsync",
 			backend=default_backend()
 		)
-		key = kdf.derive(binascii.unhexlify(self.passphrase))
+		key = kdf.derive(synckey)
 
-		self.privateKey  = key[:32]
-		self.privateHmac = key[32:]
+		crypt_key = key[:32]
+		hmac_key  = key[32:]
 
 		logging.info("Successfully generated sync key and hmac key")
-		logging.debug("sync key: %s, crypt key: %s, crypt hmac: %s" % (self.passphrase, binascii.hexlify(self.privateKey), binascii.hexlify(self.privateHmac)))
+		logging.debug("sync key: %s, crypt key: %s, hmac key: %s" % (binascii.hexlify(synckey), binascii.hexlify(crypt_key), binascii.hexlify(hmac_key)))
 
+		return WeaveKeypair(crypt_key, hmac_key)
 
+		
 # Command-Line helper utilities
 
 class TextFormatter(object):
@@ -969,7 +983,7 @@ if __name__ == "__main__":
 	parser.add_option("-c", "--collection", help="collection", dest="collection")
 	parser.add_option("-i", "--id", help="object ID", dest="id")
 	parser.add_option("-f", "--format", help="format (default is text; options are text, json, xml)", default="text", dest="format")
-	parser.add_option("-v", "--storage-version", help="weave client version (5|6). Defaults to v5", dest="storage_version")
+	parser.add_option("-v", "--api-version", help="weave sync storage api version (V1_1|V1_5). Defaults to V1_1", dest="api_version")
 	parser.add_option("-l", "--log-level", help="set log level (critical|error|warn|info|debug)", dest="loglevel")
 	parser.add_option("-m", "--modify", help="Update collection, or single item, with given value in JSON format. Requires -c and optionally -i", dest="modify")
 	parser.add_option("", "--plaintext", help="Plaintext collection, don't decrypt", action="store_true", dest="plaintext")
@@ -1013,10 +1027,6 @@ if __name__ == "__main__":
 	formatter = FORMATTERS[options.format]
 
 	if options.testmode:
-		# print "weaveaccount.TEST_MODE: " + str(wa_get_test_mode())
-		# wa_set_test_mode(True)		
-		# print "weaveaccount.TEST_MODE: " + str(wa_get_test_mode())
-		
 		print "weaveaccount.TEST_MODE: " + str(WA_TEST_MODE)
 		WA_TEST_MODE = True
 		print "weaveaccount.TEST_MODE: " + str(WA_TEST_MODE)
@@ -1031,17 +1041,32 @@ if __name__ == "__main__":
 	else:
 		decrypt=True
 	
-	if options.storage_version:
-		storage_version = int(options.storage_version)
+	if options.api_version:
+		api_version = options.api_version
 	else:
-		storage_version = 5
+		api_version = "V1_1"
 
 	if options.synckey:
 		synckey = options.synckey
 	else:
 		synckey = None
 
-	if storage_version == 6:
+	if api_version == "V1_1":
+
+		if options.account_server:
+			account_server = options.account_server
+		else:
+			account_server="https://auth.services.mozilla.com"
+
+		wc_params = {
+			'api_version': "V1_1",
+			'account_server': account_server,
+			'username': options.username,
+			'password': options.password,
+			'synckey': synckey,
+		}
+		
+	elif api_version == "V1_5":
 
 		if options.account_server:
 			account_server = options.account_server
@@ -1053,23 +1078,21 @@ if __name__ == "__main__":
 		else:
 			token_server="https://token.services.mozilla.com"
 
-		weaveClient = WeaveClientV6(account_server, token_server, options.username, options.password, synckey=synckey)
-	
-	elif storage_version == 5:
-
-		if options.account_server:
-			account_server = options.account_server
-		else:
-			account_server="https://auth.services.mozilla.com"
+		wc_params = {
+			'api_version': "V1_5",
+			'account_server': account_server,
+			'token_server': token_server,
+			'username': options.username,
+			'password': options.password,
+		}
+		if not synckey == None:
+			wc_params['synckey'] = synckey
 		
-		weaveClient = WeaveClientV5(account_server, options.username, options.password, synckey)
 	else:
-		raise WeaveException("Storage version '%s' not supported" % storage_version)
+		raise WeaveException("API version '%s' not supported" % api_version)
 		
+	weaveClient = WeaveClient.get_instance(wc_params)
 
-	#DEBUG only
-	#sys.exit(0)
-	
 	# Now do what the user asked for
 
 	if options.modify:
