@@ -62,13 +62,12 @@ import pprint
 import hawk
 
 from urlparse import urlparse
-from hawk.util import parse_normalized_url
 
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
 
-from weaveinclude import WeaveException
+from weaveinclude import WeaveException, parse_normalized_url
 from weaveaccount import WeaveAccountLegacy, WeaveAccountFxA, TEST_MODE as WA_TEST_MODE
 
 

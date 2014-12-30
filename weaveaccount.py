@@ -74,8 +74,6 @@ from browserid import jwt, LocalVerifier
 from browserid.crypto import RSKey
 from browserid.utils import bundle_certs_and_assertion, unbundle_certs_and_assertion, get_assertion_info, to_int
 
-from fxa_client.fxa_crypto import dumpCert, createAssertion, createBackedAssertion, verifyBackedAssertion
-
 from weaveinclude import WeaveException, trim_str
 
 opener = urllib2.build_opener(urllib2.HTTPHandler)
