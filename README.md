@@ -8,9 +8,20 @@ Weave Sync/Firefox Sync client library written in Python.
 * Encrypt/Decrypt data stored on Weave Sync server (read and write)
 * Commandline client
 
-## Library
+## Installation
 
-### Weave Client
+Clone the repository and install the following dependencies
+
+* PyFxA
+* PyBrowserID
+* PyHawk
+* cryptography
+* M2Crypto
+* requests
+
+## Usage
+
+### Library
 
 ```python
 import weaveclient as wc
@@ -38,9 +49,7 @@ if len(wbo['payload']) > 0:
    print wbo['payload']
 ```
 
-## Commandline
-
-### Weave Client
+### Commandline
 ```
 Usage: weaveclient [options]
 
