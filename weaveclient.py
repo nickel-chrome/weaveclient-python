@@ -799,20 +799,7 @@ class WeaveClientV1_1(WeaveClient):
 		self.ctx = WeaveStorageV1_1(account, username, password)
 
 		# Get sync keypair
-		
-		# Remove dash chars, convert to uppercase and translate 8 and 9 to L and O
-		synckey_b32 = string.translate(str.upper(synckey), string.maketrans('89', 'LO'), '-')
-		
-		#logging.debug("normalised sync key: %s" % synckey_b32)
-		
-		# Pad base32 string to multiple of 8 chars (40 bits)
-		if (len(synckey_b32) % 8) > 0:
-			paddedLength = len(synckey_b32) + 8 - (len(synckey_b32) % 8)
-			synckey_b32 = synckey_b32.ljust(paddedLength, '=')
-
-		synckey_bin = base64.b32decode(synckey_b32)
-
-		sync_keypair = self.derive_sync_keypair(synckey_bin, username)
+		sync_keypair = self.derive_sync_keypair(self.decode_synckey(synckey), username)
 
 		# Check storage version
 		meta = self.ctx.get_meta()
@@ -828,11 +815,28 @@ class WeaveClientV1_1(WeaveClient):
 		self.crypto = WeaveCryptoContext.get_instance(params)
 
 
+	def decode_synckey(self, synckey):
+		"""Decode base32 encoded synckey
+		NOTE: non-standard base32 encoding is used so encoding must first be normalised
+		"""
+		
+		# Remove dash chars, convert to uppercase and translate 8 and 9 to L and O
+		synckey_b32 = string.translate(str.upper(synckey), string.maketrans('89', 'LO'), '-')
+		
+		#logging.debug("normalised sync key: %s" % synckey_b32)
+		
+		# Pad base32 string to multiple of 8 chars (40 bits)
+		if (len(synckey_b32) % 8) > 0:
+			paddedLength = len(synckey_b32) + 8 - (len(synckey_b32) % 8)
+			synckey_b32 = synckey_b32.ljust(paddedLength, '=')
+
+		synckey_bin = base64.b32decode(synckey_b32)
+		
+		return synckey_bin
+
+
 	def derive_sync_keypair(self, synckey, username):
-		"""Fetch the private key for the user and storage context
-		provided to this object, and decrypt the private key
-		by using my passphrase.	 Store the private key in internal
-		storage for later use."""
+		"""Derive the private keypair for the sync account"""
 		
 		logging.debug("derive_sync_keypair()")
 
@@ -978,15 +982,15 @@ if __name__ == "__main__":
 
 	parser.add_option("-u", "--user", help="username", dest="username")
 	parser.add_option("-p", "--password", help="password (sent securely to server)", dest="password")
-	parser.add_option("-k", "--passphrase", help="synckey (used locally)", dest="synckey")
+	parser.add_option("-k", "--synckey", help="synckey (used locally)", dest="synckey")
 	parser.add_option("-K", "--credentialfile", help="get username, password, and synckey from this credential file (as name=value lines)", dest="credentialfile")
 	parser.add_option("-c", "--collection", help="collection", dest="collection")
 	parser.add_option("-i", "--id", help="object ID", dest="id")
-	parser.add_option("-f", "--format", help="format (default is text; options are text, json, xml)", default="text", dest="format")
+	parser.add_option("-f", "--format", help="format (json|xml|text). Defaults to json", default="json", dest="format")
 	parser.add_option("-v", "--api-version", help="weave sync storage api version (V1_1|V1_5). Defaults to V1_1", dest="api_version")
-	parser.add_option("-l", "--log-level", help="set log level (critical|error|warn|info|debug)", dest="loglevel")
+	parser.add_option("-l", "--log-level", help="set log level (critical|error|warn|info|debug). Defaults to info", dest="loglevel")
 	parser.add_option("-m", "--modify", help="Update collection, or single item, with given value in JSON format. Requires -c and optionally -i", dest="modify")
-	parser.add_option("", "--plaintext", help="Plaintext collection, don't decrypt", action="store_true", dest="plaintext")
+	parser.add_option("", "--plaintext", help="plaintext collection, don't decrypt", action="store_true", dest="plaintext")
 	parser.add_option("", "--test-mode", help="use test data", action="store_true", dest="testmode")
 
 
