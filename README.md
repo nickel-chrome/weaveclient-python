@@ -10,11 +10,16 @@ Weave Sync/Firefox Sync client library written in Python.
 
 ## Installation
 
-Clone the repository and install the following dependencies
+Clone the repository and install the following module dependencies
 
+**Note:** At the time of writing the Mozilla modules were not stable and hence to use weaveclient-python with the least grief it is recommended that a virtualenv is used so as to be able to install the latest dev versions of the mozilla modules.
+
+**Mozilla**
 * PyFxA
 * PyBrowserID
 * PyHawk
+
+**Other**
 * cryptography
 * M2Crypto
 * requests
@@ -50,6 +55,7 @@ if len(wbo['payload']) > 0:
 ```
 
 ### Commandline
+
 ```
 Usage: weaveclient [options]
 
@@ -84,4 +90,9 @@ Options:
                         JSON format. Requires -c and optionally -i
   --plaintext           plaintext collection, don't decrypt
   --test-mode           use test data
+```
+
+**Note:** To run weaveclient from an alternative python installation, i.e. a virtualenv, use the PYTHON_BIN environment variable, e.g.:
+```
+$ PYTHON_BIN=path/to/alternative/python weaveclient
 ```
